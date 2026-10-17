@@ -1,0 +1,97 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Resolve packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Vox.xcodeproj -scheme Vox \
+            -clonedSourcePackagesDirPath build/spm
+
+      - name: Build app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Vox.xcodeproj \
+            -scheme Vox \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd \
+            -clonedSourcePackagesDirPath build/spm \
+            MARKETING_VERSION=1.0.${{ github.run_number }} \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build/xcodebuild.log | grep -E "error:|warning: unre|BUILD (SUCCEEDED|FAILED)|\*\* " || true
+          if grep -q "BUILD FAILED" build/xcodebuild.log || ! grep -q "BUILD SUCCEEDED" build/xcodebuild.log; then
+            echo "::group::Compiler errors"
+            grep -E "error:" -A3 build/xcodebuild.log | head -300
+            echo "::endgroup::"
+            exit 1
+          fi
+
+      - name: Package IPA
+        run: |
+          APP=build/dd/Build/Products/Release-iphoneos/Vox.app
+          test -d "$APP"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Vox.ipa Payload
+          ls -lh Vox.ipa
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vox-ipa
+          path: Vox.ipa
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Vox 1.0.${{ github.run_number }}
+          make_latest: true
+          files: Vox.ipa
+          body: |
+            Неподписанная сборка Vox для установки через iLoader / SideStore / Sideloadly.
+            Прямая ссылка на последнюю версию: https://github.com/${{ github.repository }}/releases/latest/download/Vox.ipa

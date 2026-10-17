@@ -1,0 +1,9 @@
+*.xcodeproj
+build/
+DerivedData/
+Payload/
+*.ipa
+.DS_Store
+xcuserdata/
+.swiftpm/
+Vox/Info.plist
