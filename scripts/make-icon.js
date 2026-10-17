@@ -1,10 +1,11 @@
 // Generates the 1024×1024 app icon (gradient + waveform) as a PNG without external dependencies.
-// Usage: node scripts/make-icon.js Vox/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+// Usage: node scripts/make-icon.js <out.png> [size=1024]
 const fs = require("fs");
 const zlib = require("zlib");
 
-const W = 1024, H = 1024;
 const out = process.argv[2] || "icon-1024.png";
+const W = Number(process.argv[3]) || 1024, H = W;
+const K = W / 1024;
 const px = Buffer.alloc(W * H * 3);
 
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -35,7 +36,7 @@ for (let y = 0; y < H; y++) {
 
 // Rounded white bars (waveform)
 const heights = [0.18, 0.34, 0.52, 0.72, 0.52, 0.86, 0.6, 0.4, 0.24];
-const barW = 58, gap = 34;
+const barW = 58 * K, gap = 34 * K;
 const total = heights.length * barW + (heights.length - 1) * gap;
 let x0 = (W - total) / 2;
 function inRoundedRect(x, y, rx, ry, rw, rh, r) {
@@ -46,7 +47,7 @@ function inRoundedRect(x, y, rx, ry, rw, rh, r) {
   return Math.max(0, Math.min(1, r - d + 0.5));
 }
 for (const h of heights) {
-  const bh = h * 560;
+  const bh = h * 560 * K;
   const by = H / 2 - bh / 2;
   for (let y = Math.floor(by) - 2; y < by + bh + 2; y++) {
     for (let x = Math.floor(x0) - 2; x < x0 + barW + 2; x++) {
