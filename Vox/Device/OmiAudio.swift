@@ -68,7 +68,7 @@ final class OpusFrameDecoder {
         let maxSamples = Int32(pcm.count)
         let n: Int32 = frame.withUnsafeBufferPointer { inPtr -> Int32 in
             pcm.withUnsafeMutableBufferPointer { outPtr -> Int32 in
-                opus_decode(d, inPtr.baseAddress, Int32(frame.count), outPtr.baseAddress, maxSamples, 0)
+                opus_decode(d, inPtr.baseAddress, Int32(frame.count), outPtr.baseAddress!, maxSamples, 0)
             }
         }
         guard n > 0 else { return nil }
@@ -81,7 +81,7 @@ final class OpusFrameDecoder {
     func concealLoss(samples: Int) -> Data? {
         guard let d = decoder, samples > 0, samples <= pcm.count else { return nil }
         let n: Int32 = pcm.withUnsafeMutableBufferPointer { outPtr -> Int32 in
-            opus_decode(d, nil, 0, outPtr.baseAddress, Int32(samples), 0)
+            opus_decode(d, nil, 0, outPtr.baseAddress!, Int32(samples), 0)
         }
         guard n > 0 else { return nil }
         return pcm.withUnsafeBufferPointer { ptr in
