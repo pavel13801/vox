@@ -3,7 +3,7 @@ const VERSION = 'vox-web-v1';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'worklet.js',
   'js/app.js', 'js/util.js', 'js/store.js', 'js/settings.js', 'js/llm.js', 'js/stt.js', 'js/ai.js',
-  'js/processing.js', 'js/recorder.js', 'js/omi.js', 'js/markdown.js',
+  'js/processing.js', 'js/recorder.js', 'js/omi.js', 'js/markdown.js', 'proxy-worker.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 

@@ -59,7 +59,10 @@ class Recorder extends Emitter {
     if (this.isRecording) return;
     this.lastError = '';
     if (settings.values.transcriptionMode === 'live' && !settings.hasKey('deepgram')) {
-      this.lastError = 'Ключ Deepgram не задан — запись сохранится, расшифровка будет после добавления ключа.';
+      const bp = settings.values.batchProvider;
+      this.lastError = bp !== 'deepgram' && settings.hasKey(bp) && settings.sttEngine(bp)
+        ? `Live-текст работает только с Deepgram. Запись расшифруется после остановки через ${settings.title(bp)}.`
+        : 'Ключ Deepgram не задан — запись сохранится, расшифруйте её позже (Настройки → Расшифровка файла).';
     }
     this.source = source;
     if (source === 'phone') {
@@ -258,6 +261,7 @@ class Recorder extends Emitter {
       const live = new DeepgramLive({
         apiKey: settings.apiKey('deepgram'), model: settings.values.deepgramModel, language: settings.values.language,
         sampleRate: rate, diarize: settings.values.diarize, keyterms: settings.keytermList,
+        endpoint: settings.route('deepgram', settings.baseURL('deepgram').replace(/^http/, 'ws') + '/listen'),
       });
       live.onResult = (r) => {
         s.transcript.apply(r);

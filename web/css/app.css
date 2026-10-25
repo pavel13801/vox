@@ -313,3 +313,8 @@ h3 { font-size: 17px; margin: 18px 0 8px; }
   .recbar, .composer { left: 50%; transform: translateX(-50%); max-width: 720px; }
 }
 .settings .row.gap .btn.small { white-space: nowrap; }
+.block { display: block; font-size: 12px; margin-top: 1px; }
+.test-result { font-size: 14px; margin: 8px 0; word-break: break-word; }
+.use-row { margin: 10px 0 4px; }
+pre.code { background: var(--card); border-radius: 12px; padding: 12px; font-size: 12px; line-height: 1.45; overflow-x: auto; white-space: pre; box-shadow: var(--shadow); -webkit-user-select: text; user-select: text; }
+.settings .group h3 .muted { text-transform: none; }

@@ -1,24 +1,43 @@
 // Browser client for OpenAI-compatible chat APIs and the Anthropic Messages API.
-import { PROVIDERS } from './settings.js';
 
 export function extractError(text) {
   try {
     const j = JSON.parse(text);
     if (Array.isArray(j) && j[0]?.error?.message) return j[0].error.message;
-    return j?.error?.message || (typeof j?.error === 'string' ? j.error : '') || j?.err_msg || j?.message || '';
+    return j?.error?.message || (typeof j?.error === 'string' ? j.error : '') || j?.err_msg || j?.message || j?.detail || '';
   } catch {
     return String(text || '').slice(0, 300);
   }
 }
 
-function describe(status, body, cfg) {
-  const t = PROVIDERS[cfg.provider]?.title || cfg.provider;
+/** Turns provider errors into an actionable message in Russian. */
+export function friendlyError(title, status, body, model = '') {
   const d = extractError(body);
-  if (status === 401 || status === 403) return `${t}: неверный ключ или нет доступа. ${d}`;
-  if (status === 404) return `${t}: модель «${cfg.model}» не найдена — выберите другую в настройках. ${d}`;
-  if (status === 429) return `${t}: превышен лимит запросов, подождите и повторите. ${d}`;
-  if (status === 402) return `${t}: недостаточно средств. ${d}`;
-  return `${t}: ошибка ${status}. ${d}`;
+  const all = `${d} ${String(body || '').slice(0, 2000)}`;
+  if (/location is not supported|unsupported_country|country, region, or territory|not available in your (country|region)|request not allowed/i.test(all)) {
+    return `${title}: сервис недоступен из вашей страны (запросы из России блокируются). Включите VPN на телефоне или настройте прокси: Настройки → Прокси. Ещё вариант — OpenRouter или DeepSeek, они работают из России.`;
+  }
+  if (/api key not valid|api_key_invalid|pass a valid api key|invalid[_ ]api[_ ]key|incorrect api key|invalid x-api-key|invalid credentials|unauthorized|authentication/i.test(all) || status === 401) {
+    return `${title}: ключ не подходит. Проверьте, что он скопирован целиком, без пробелов, и выдан именно для ${title}. (${status}) ${d}`;
+  }
+  if (status === 404 || /not found|does not exist|no such model|unknown model|model_not_found/i.test(d)) {
+    return `${title}: модель «${model}» не найдена. Нажмите ⟳ рядом с моделью, чтобы загрузить список доступных. (${status}) ${d}`;
+  }
+  if (status === 429 || /quota|rate limit|resource_exhausted/i.test(all)) return `${title}: превышен лимит запросов или квота. Подождите и повторите. ${d}`;
+  if (status === 402 || /insufficient|balance|credit/i.test(all)) return `${title}: недостаточно средств на счёте. ${d}`;
+  if (status === 403) return `${title}: нет доступа (403). Возможно, ключ без нужных прав или страна заблокирована. ${d}`;
+  if (status === 413) return `${title}: файл слишком большой. ${d}`;
+  return `${title}: ошибка ${status}. ${d}`;
+}
+
+/** fetch with a readable message for network/CORS failures. */
+export async function request(url, init, title) {
+  try {
+    return await fetch(url, init);
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    throw new Error(`Не удалось связаться с ${title}: нет интернета, адрес заблокирован или сервис не принимает запросы из браузера (CORS). Попробуйте VPN или прокси (Настройки → Прокси).`);
+  }
 }
 
 class HTTPError extends Error {
@@ -26,10 +45,9 @@ class HTTPError extends Error {
 }
 
 function ensure(cfg) {
-  const t = PROVIDERS[cfg.provider]?.title || cfg.provider;
-  if (cfg.provider !== 'custom' && !cfg.apiKey) throw new Error(`Нет API-ключа для ${t}. Добавьте его в Настройки → Ключи API.`);
-  if (!cfg.model) throw new Error(`Не выбрана модель для ${t}.`);
-  if (!cfg.baseURL) throw new Error(`Не задан адрес API для ${t}.`);
+  if (!cfg.custom && !cfg.apiKey) throw new Error(`Нет API-ключа для ${cfg.title}. Добавьте его в Настройки → Ключи и провайдеры.`);
+  if (!cfg.model) throw new Error(`Не выбрана модель для ${cfg.title}.`);
+  if (!cfg.baseURL) throw new Error(`Не задан адрес API для ${cfg.title}.`);
 }
 
 const base = (cfg) => cfg.baseURL.replace(/\/+$/, '');
@@ -38,7 +56,7 @@ function buildRequest(cfg, system, messages, { json = false, stream = false } = 
   ensure(cfg);
   const headers = { 'Content-Type': 'application/json' };
   let url, body;
-  if (cfg.provider === 'anthropic') {
+  if (cfg.kind === 'anthropic') {
     url = `${base(cfg)}/messages`;
     headers['x-api-key'] = cfg.apiKey;
     headers['anthropic-version'] = '2023-06-01';
@@ -58,11 +76,11 @@ function buildRequest(cfg, system, messages, { json = false, stream = false } = 
 
 async function completeOnce(cfg, system, messages, json, signal) {
   const { url, init } = buildRequest(cfg, system, messages, { json });
-  const res = await fetch(url, { ...init, signal });
+  const res = await request(url, { ...init, signal }, cfg.title);
   const text = await res.text();
-  if (!res.ok) throw new HTTPError(res.status, describe(res.status, text, cfg));
+  if (!res.ok) throw new HTTPError(res.status, friendlyError(cfg.title, res.status, text, cfg.model));
   const j = JSON.parse(text);
-  if (cfg.provider === 'anthropic') {
+  if (cfg.kind === 'anthropic') {
     const out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
     if (!out) throw new Error('Модель вернула пустой ответ');
     return out;
@@ -90,8 +108,8 @@ export async function complete(cfg, system, messages, { json = false, signal } =
 /** Streams text pieces; calls onPiece for each. Returns the full text. */
 export async function stream(cfg, system, messages, onPiece, signal) {
   const { url, init } = buildRequest(cfg, system, messages, { stream: true });
-  const res = await fetch(url, { ...init, signal });
-  if (!res.ok) throw new Error(describe(res.status, await res.text(), cfg));
+  const res = await request(url, { ...init, signal }, cfg.title);
+  if (!res.ok) throw new Error(friendlyError(cfg.title, res.status, await res.text(), cfg.model));
   if (!res.body || !res.body.getReader) {
     const full = await complete(cfg, system, messages, { signal });
     onPiece(full);
@@ -115,7 +133,7 @@ export async function stream(cfg, system, messages, onPiece, signal) {
       try { obj = JSON.parse(payload); } catch { continue; }
       if (obj.error?.message) throw new Error(obj.error.message);
       let piece = '';
-      if (cfg.provider === 'anthropic') {
+      if (cfg.kind === 'anthropic') {
         if (obj.type === 'content_block_delta') piece = obj.delta?.text || '';
       } else {
         piece = obj.choices?.[0]?.delta?.content || '';
@@ -132,16 +150,16 @@ export async function stream(cfg, system, messages, onPiece, signal) {
 
 export async function listModels(cfg) {
   const headers = {};
-  if (cfg.provider === 'anthropic') {
+  if (cfg.kind === 'anthropic') {
     headers['x-api-key'] = cfg.apiKey;
     headers['anthropic-version'] = '2023-06-01';
     headers['anthropic-dangerous-direct-browser-access'] = 'true';
   } else if (cfg.apiKey) {
     headers['Authorization'] = `Bearer ${cfg.apiKey}`;
   }
-  const res = await fetch(`${base(cfg)}/models`, { headers });
+  const res = await request(`${base(cfg)}/models`, { headers }, cfg.title);
   const text = await res.text();
-  if (!res.ok) throw new Error(describe(res.status, text, cfg));
+  if (!res.ok) throw new Error(friendlyError(cfg.title, res.status, text, cfg.model));
   const j = JSON.parse(text);
   const list = j.data || j.models || [];
   const skip = ['embedding', 'embed', 'tts', 'whisper', 'dall-e', 'image', 'moderation', 'audio', 'transcribe', 'realtime', 'guard'];

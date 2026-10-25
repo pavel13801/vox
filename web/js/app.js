@@ -1,12 +1,12 @@
 // Vox web — UI (hash router, views, delegated actions).
 import { esc, fmt, trim, toast, shareOrDownload, isIOS, isStandalone, extForMime, uuid } from './util.js';
 import { store, conv, newConversation, STATUS_LABEL } from './store.js';
-import { settings, PROVIDERS, LLM_PROVIDERS, BATCH_PROVIDERS, LANGUAGES, SUMMARY_LANGUAGES } from './settings.js';
+import { settings, PRESETS, STT_ENGINES, LANGUAGES, SUMMARY_LANGUAGES } from './settings.js';
 import { recorder } from './recorder.js';
 import { processing } from './processing.js';
 import { TEMPLATES, template, chat } from './ai.js';
 import { listModels, complete } from './llm.js';
-import { verifyDeepgram } from './stt.js';
+import { verifyDeepgram, verifyTranscription } from './stt.js';
 import { omi } from './omi.js';
 import { md } from './markdown.js';
 
@@ -90,10 +90,10 @@ function doRender() {
     case 'memory': html = viewMemory(); break;
     case 'settings':
       tab = 'settings';
-      html = parts[1] === 'key' ? viewKey(parts[2]) : parts[1] === 'instructions' ? viewInstructions() : viewSettings();
+      html = parts[1] === 'key' ? viewKey(parts[2]) : parts[1] === 'add' ? viewAddProvider() : parts[1] === 'instructions' ? viewInstructions() : viewSettings();
       break;
     case 'device': html = viewDevice(); tab = 'settings'; break;
-    case 'help': html = viewHelp(); tab = 'settings'; break;
+    case 'help': html = viewHelp(parts[1]); tab = 'settings'; break;
     default: html = viewHome(); tab = 'home';
   }
   $view.innerHTML = html;
@@ -248,8 +248,8 @@ function viewHome() {
     html += (ui.search || ui.starredOnly || ui.category)
       ? empty('🔍', 'Ничего не найдено', 'Попробуйте другой запрос или сбросьте фильтр.')
       : empty('🎙️', 'Пока нет записей', 'Нажмите на красную кнопку внизу, чтобы начать запись, или импортируйте аудиофайл (⤓ вверху).');
-    if (!settings.hasKey('deepgram')) {
-      html += `<div class="card info"><b>Первый шаг — ключи</b><p>Добавьте ключ Deepgram (расшифровка) и ключ ИИ (сводки, чат).</p>
+    if (!settings.hasKey('deepgram') && !settings.hasKey(settings.values.batchProvider)) {
+      html += `<div class="card info"><b>Первый шаг — ключи</b><p>Добавьте ключ для расшифровки (Deepgram, Gemini, Groq…) и ключ ИИ для сводок и чата. Один ключ Gemini или Groq подходит для обоих.</p>
         <button class="btn" data-action="nav" data-to="settings">Открыть настройки</button></div>`;
     }
   }
@@ -323,7 +323,7 @@ function viewDetail(id) {
       <button class="icon-btn star-btn ${c.starred ? 'on' : ''}" data-action="star" data-id="${c.id}">${c.starred ? '★' : '☆'}</button>
     </div>`;
   if (conv.isProcessing(c) || processing.activeID === c.id) {
-    html += `<div class="card row"><span class="spinner"></span> ${c.status === 'summarizing' ? 'ИИ анализирует запись…' : 'Идёт расшифровка…'}</div>`;
+    html += `<div class="card row"><span class="spinner"></span> ${c.status === 'summarizing' ? 'ИИ анализирует запись…' : `Идёт расшифровка…${c.progressText ? ' ' + esc(c.progressText) : ''}`}</div>`;
   } else if (c.status === 'failed') {
     html += `<div class="card warn"><b>⚠︎ Не удалось обработать</b>${c.errorMessage ? `<p class="small">${esc(c.errorMessage)}</p>` : ''}
       <button class="btn" data-action="retry" data-id="${c.id}">Повторить</button></div>`;
@@ -482,10 +482,28 @@ function viewChat(scopeId) {
 
 // ---------------------------------------------------------------- settings
 
+function providerRow(id) {
+  const p = settings.provider(id);
+  const caps = [p.llm ? 'ИИ' : '', settings.sttEngine(id) ? 'расшифровка' : ''].filter(Boolean).join(' + ');
+  const ok = settings.hasKey(id);
+  return `<a class="row nav-row sub" href="#/settings/key/${encodeURIComponent(id)}">
+    <span>${esc(p.title)}<small class="muted block">${esc(caps)}${p.builtin ? '' : ' · свой'}</small></span>
+    <span>${ok ? '<span class="ok">✓</span>' : '<span class="muted">нет ключа</span>'} ›</span></a>`;
+}
+
+const sttLabel = (id) => {
+  const e = settings.sttEngine(id);
+  const how = e === 'deepgram' ? 'со спикерами' : e === 'chat' ? 'ИИ-модель' : 'Whisper';
+  return `${settings.title(id)} (${how})${settings.hasKey(id) ? '' : ' — нет ключа'}`;
+};
+
 function viewSettings() {
   const v = settings.values;
-  const keysCount = Object.keys(PROVIDERS).filter(p => p !== 'custom' && settings.hasKey(p)).length;
-  const p = v.llmProvider;
+  const ids = settings.providerIds();
+  const keysCount = ids.filter(id => settings.provider(id).builtin && settings.hasKey(id)).length + v.customProviders.length;
+  const llm = v.llmProvider;
+  const bp = v.batchProvider;
+  const bpInfo = settings.provider(bp);
   return header('Настройки') + `<div class="content settings">
     <section class="group">
       <h3>Профиль</h3>
@@ -493,36 +511,16 @@ function viewSettings() {
     </section>
 
     <section class="group">
-      <a class="row nav-row" href="#/settings/key/deepgram"><span>🔑 Ключи API</span><span class="muted">${keysCount ? `задано: ${keysCount}` : 'не заданы'} ›</span></a>
-      <div class="list inset">
-        ${Object.keys(PROVIDERS).map(k => `<a class="row nav-row sub" href="#/settings/key/${k}"><span>${esc(PROVIDERS[k].title)}</span><span>${settings.hasKey(k) ? '<span class="ok">✓</span>' : '<span class="muted">нет</span>'} ›</span></a>`).join('')}
-      </div>
-      <p class="hint">Ключи хранятся только в этом браузере на вашем телефоне и отправляются напрямую провайдерам.</p>
-    </section>
-
-    <section class="group">
-      <h3>Распознавание речи</h3>
-      <label class="row field"><span>Расшифровка</span>${settingSelect('transcriptionMode', [['live', 'В реальном времени'], ['afterRecording', 'После записи (дешевле)']])}</label>
-      <label class="row field"><span>Язык</span>${settingSelect('language', LANGUAGES)}</label>
-      <label class="row field"><span>Модель Deepgram</span>${settingSelect('deepgramModel', [['nova-3', 'Nova-3 (лучшая)'], ['nova-2', 'Nova-2']])}</label>
-      ${toggle('diarize', 'Разделять по спикерам')}
-      <label class="field col"><span>Ключевые слова</span>
-        <textarea id="set-keyterms" rows="2" placeholder="Имена, термины, названия — через запятую" data-setting="keyterms">${esc(v.keyterms)}</textarea></label>
-      <p class="hint">Live — текст появляется во время записи (≈ $0.46/час). «После записи» — дешевле (≈ $0.26/час) и точнее со спикерами. $200 бесплатного кредита Deepgram — это сотни часов.</p>
-    </section>
-
-    <section class="group">
-      <h3>Расшифровка файла</h3>
-      <label class="row field"><span>Сервис</span>${settingSelect('batchProvider', Object.entries(BATCH_PROVIDERS).map(([k, b]) => [k, b.title]))}</label>
-      ${v.batchProvider !== 'deepgram' ? `<label class="row field"><span>Модель</span><input id="set-batchmodel" type="text" placeholder="${esc(BATCH_PROVIDERS[v.batchProvider].model)}" value="${esc(v.batchModel)}" data-setting="batchModel" autocapitalize="off" autocorrect="off"></label>` : ''}
-      ${toggle('alwaysRetranscribe', 'Всегда перерасшифровывать после записи')}
-      <p class="hint">Для режима «После записи», импорта, кнопки «Расшифровать заново» и автоматически — если во время live-записи пропадала связь. Groq Whisper бесплатен, но не различает спикеров.</p>
+      <h3>Ключи и провайдеры <span class="muted">· ${keysCount}</span></h3>
+      <div class="list inset">${ids.map(providerRow).join('')}</div>
+      <a class="row nav-row btn-row" href="#/settings/add">＋ Добавить любой другой ИИ (Mistral, Grok, Qwen, свой сервер…)</a>
+      <p class="hint">Ключи хранятся только в этом браузере и отправляются напрямую провайдерам.</p>
     </section>
 
     <section class="group">
       <h3>ИИ-анализ и чат</h3>
-      <label class="row field"><span>Провайдер</span>${settingSelect('llmProvider', LLM_PROVIDERS.map(k => [k, PROVIDERS[k].title + (settings.hasKey(k) ? '' : ' — нет ключа')]))}</label>
-      ${modelField(p)}
+      <label class="row field"><span>Провайдер</span>${settingSelect('llmProvider', settings.llmProviders().map(k => [k, settings.title(k) + (settings.hasKey(k) ? '' : ' — нет ключа')]))}</label>
+      ${modelField(llm)}
       ${toggle('autoSummarize', 'Автоматическая сводка')}
       <label class="row field"><span>Язык сводки</span>${settingSelect('summaryLanguage', Object.entries(SUMMARY_LANGUAGES).map(([k, x]) => [k, x.title]))}</label>
       <label class="row field"><span>Шаблон</span>${settingSelect('defaultTemplate', TEMPLATES.map(t => [t.id, t.title]))}</label>
@@ -530,7 +528,38 @@ function viewSettings() {
       ${toggle('extractMemories', 'Запоминать факты обо мне')}
       <label class="row field"><span>Объём контекста</span>${settingSelect('maxContextChars', [[100000, 'Малый (~100 тыс. симв.)'], [300000, 'Средний (~300 тыс.)'], [800000, 'Большой (~800 тыс.)'], [2000000, 'Огромный (~2 млн, Gemini)']], v.maxContextChars, 'number')}</label>
       <a class="row nav-row" href="#/settings/instructions"><span>Свои инструкции для ИИ</span><span class="muted">${v.customInstructions ? 'заданы' : ''} ›</span></a>
-      <p class="hint">Бесплатно: Google Gemini (ключ в AI Studio) или Groq. Длинные записи обрабатываются по частям.</p>
+    </section>
+
+    <section class="group">
+      <h3>Распознавание речи</h3>
+      <label class="row field"><span>Режим</span>${settingSelect('transcriptionMode', [['live', 'В реальном времени (Deepgram)'], ['afterRecording', 'После записи']])}</label>
+      <label class="row field"><span>Язык</span>${settingSelect('language', LANGUAGES)}</label>
+      <label class="row field"><span>Модель Deepgram</span>${settingSelect('deepgramModel', [['nova-3', 'Nova-3 (лучшая)'], ['nova-2', 'Nova-2']])}</label>
+      ${toggle('diarize', 'Разделять по спикерам')}
+      <label class="field col"><span>Ключевые слова</span>
+        <textarea id="set-keyterms" rows="2" placeholder="Имена, термины, названия — через запятую" data-setting="keyterms">${esc(v.keyterms)}</textarea></label>
+      <p class="hint">Live-текст во время записи умеет только Deepgram. В режиме «После записи» файл расшифровывает сервис ниже — любой, в том числе Gemini.</p>
+    </section>
+
+    <section class="group">
+      <h3>Расшифровка файла</h3>
+      <label class="row field"><span>Сервис</span>${settingSelect('batchProvider', settings.sttProviders().map(k => [k, sttLabel(k)]))}</label>
+      ${bp !== 'deepgram' && bpInfo?.kind === 'openai' ? `<label class="row field"><span>Способ</span>
+        <select data-setin="sttEngines" data-p="${esc(bp)}">${Object.entries(STT_ENGINES).map(([k, t]) => `<option value="${k}" ${settings.sttEngine(bp) === k ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>` : ''}
+      ${bp !== 'deepgram' ? sttModelField(bp) : ''}
+      ${toggle('alwaysRetranscribe', 'Всегда перерасшифровывать после записи')}
+      ${bp !== 'deepgram' ? `<button class="btn small ghost" data-action="test-stt" data-p="${esc(bp)}">${ui.keyTest['stt:' + bp]?.busy ? '<span class="spinner sm"></span> Проверяю…' : '🎧 Проверить расшифровку'}</button>
+        ${testLine('stt:' + bp)}` : ''}
+      <p class="hint">Для режима «После записи», импорта, «Расшифровать заново» и автоматически — если во время live-записи пропадала связь.
+        Gemini и другие ИИ-модели расшифровывают со спикерами, но время реплик приблизительное. Groq Whisper — бесплатно, без спикеров.</p>
+    </section>
+
+    <section class="group">
+      <h3>Прокси (обход блокировок)</h3>
+      <label class="field col"><span>Адрес прокси</span>
+        <input id="set-proxy" type="url" placeholder="https://vox-proxy.ваше-имя.workers.dev" value="${esc(v.proxyURL)}" data-setting="proxyURL" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <p class="hint">Google Gemini, OpenAI и Claude не работают из России (ошибка «location is not supported»). Решения: VPN на телефоне, OpenRouter/DeepSeek или свой бесплатный прокси на Cloudflare — <a href="#/help/proxy">инструкция за 3 минуты</a>.
+        ${v.proxyURL ? 'Через прокси идут: ' + esc(settings.providerIds().filter(id => settings.usesProxy(id)).map(id => settings.title(id)).join(', ') || 'ничего — включите в карточке провайдера') + '.' : ''}</p>
     </section>
 
     <section class="group">
@@ -549,28 +578,47 @@ function viewSettings() {
       <button class="row nav-row btn-row" data-action="export-json">⤒ Экспорт всех записей (JSON)</button>
       <label class="row nav-row btn-row">⤓ Импорт резервной копии<input type="file" accept="application/json,.json" hidden data-action-change="import-json"></label>
       <button class="row nav-row btn-row danger" data-action="delete-all">🗑 Удалить все данные</button>
-      <p class="hint">Аудио каждой записи можно сохранить из её меню (⋯). Резервная копия JSON содержит тексты, сводки, задачи и память.</p>
     </section>
 
     <section class="group">
       <a class="row nav-row" href="#/help"><span>❔ Справка и установка</span><span>›</span></a>
-      <div class="row between"><span>Версия</span><span class="muted">веб 1.0</span></div>
+      <div class="row between"><span>Версия</span><span class="muted">веб 1.1</span></div>
     </section>
     <div class="spacer"></div>
   </div>`;
 }
 
-function modelField(p) {
+function testLine(key) {
+  const t = ui.keyTest[key];
+  if (!t || t.busy) return '';
+  return `<p class="test-result ${t.ok ? 'ok' : 'bad'}">${t.ok ? '✓' : '✕'} ${esc(t.text)}</p>`;
+}
+
+function modelField(p, { label = 'Модель' } = {}) {
+  const info = settings.provider(p);
+  if (!info || !info.llm) return '';
   const loaded = ui.models[p] || [];
-  const all = [...new Set([...PROVIDERS[p].models, ...loaded])];
-  return `<label class="field col"><span>Модель</span>
+  const all = [...new Set([...(info.models || []), ...loaded])];
+  return `<label class="field col"><span>${esc(label)}</span>
     <div class="row gap">
-      <input id="model-${p}" type="text" list="models-${p}" placeholder="${esc(PROVIDERS[p].model)}" value="${esc(settings.model(p))}"
-        data-model="${p}" autocapitalize="off" autocorrect="off" spellcheck="false">
-      <datalist id="models-${p}">${all.map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>
-      <button class="btn small ghost" data-action="load-models" data-p="${p}">${ui.modelsLoading === p ? '<span class="spinner sm"></span>' : '⟳'}</button>
+      <input id="model-${esc(p)}" type="text" list="models-${esc(p)}" placeholder="${esc(info.model || 'название модели')}" value="${esc(settings.model(p))}"
+        data-model="${esc(p)}" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <datalist id="models-${esc(p)}">${all.map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>
+      <button class="btn small ghost" data-action="load-models" data-p="${esc(p)}">${ui.modelsLoading === p ? '<span class="spinner sm"></span>' : '⟳'}</button>
     </div>
-    ${loaded.length ? `<small class="muted">Загружено моделей: ${loaded.length} — выберите из подсказок</small>` : '<small class="muted">⟳ — загрузить список доступных моделей</small>'}
+    <small class="muted">${loaded.length ? `Загружено моделей: ${loaded.length} — начните вводить, появятся подсказки` : 'Любое название модели этого провайдера. ⟳ — загрузить список'}</small>
+  </label>`;
+}
+
+function sttModelField(p) {
+  const info = settings.provider(p);
+  const engine = settings.sttEngine(p);
+  const suggestions = [...new Set([...(info.sttModels || []), ...(engine === 'chat' ? (info.models || []) : []), ...(ui.models[p] || [])])];
+  return `<label class="field col"><span>Модель расшифровки</span>
+    <input id="sttmodel-${esc(p)}" type="text" list="sttmodels-${esc(p)}" placeholder="${esc(info.sttModel || (engine === 'chat' ? 'модель с поддержкой аудио' : 'whisper-1'))}"
+      value="${esc(settings.values.sttModels?.[p] || '')}" data-setin="sttModels" data-p="${esc(p)}" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <datalist id="sttmodels-${esc(p)}">${suggestions.map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>
+    <small class="muted">Сейчас: ${esc(settings.sttModel(p))}${engine === 'chat' ? ' · нужна модель, которая понимает звук (Gemini 2.x/Flash, GPT-4o audio)' : ''}</small>
   </label>`;
 }
 
@@ -580,36 +628,70 @@ function viewInstructions() {
     <p class="hint">Добавляется к каждому запросу на сводку.</p></div>`;
 }
 
+function viewAddProvider() {
+  return header('Добавить провайдера', { back: 'settings' }) + `<div class="content settings">
+    <p class="hint">Подходит любой сервис с OpenAI-совместимым API (так устроено большинство нейросетей) или с API как у Anthropic. Выберите шаблон — адрес подставится сам, останется вставить ключ.</p>
+    <section class="group"><div class="list inset">
+      ${PRESETS.map((p, i) => `<button class="row nav-row btn-row" data-action="add-provider" data-i="${i}"><span>${esc(p.title)}<small class="muted block">${esc(p.base || 'свой адрес')}</small></span><span>＋</span></button>`).join('')}
+    </div></section></div>`;
+}
+
 function viewKey(p) {
-  if (!PROVIDERS[p]) return viewSettings();
-  const info = PROVIDERS[p];
+  const info = settings.provider(p);
+  if (!info) return viewSettings();
   const k = `key:${p}`;
   const val = ui.drafts[k] ?? settings.apiKey(p);
-  const test = ui.keyTest[p];
-  let h = header(info.title, { back: 'settings' }) + `<div class="content settings">
-    <section class="group">
-      <label class="field col"><span>API-ключ</span>
-        <input id="key-${p}" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Вставьте ключ" value="${esc(val)}" data-draft="${k}">
-      </label>
-      <div class="row gap">
-        <button class="btn small ghost" data-action="paste-key" data-p="${p}">📋 Вставить</button>
-        <button class="btn small ghost" data-action="reveal-key" data-p="${p}">👁 Показать</button>
-        ${info.url ? `<a class="btn small ghost" href="${info.url}" target="_blank" rel="noopener">Получить ключ ↗</a>` : ''}
-      </div>
-      <p class="hint">${esc(info.hint)}</p>
-    </section>`;
-  if (p !== 'deepgram') {
+  const custom = !info.builtin;
+  const cp = custom ? settings.values.customProviders.find(x => x.id === p) : null;
+  const testKey = ui.keyTest[p];
+  let h = header(info.title, { back: 'settings' }) + '<div class="content settings">';
+  if (custom) {
     h += `<section class="group">
-      <label class="field col"><span>Адрес API</span>
-        <input id="base-${p}" type="url" autocapitalize="off" placeholder="${esc(info.base || 'https://…/v1')}" value="${esc(settings.values.baseURLs?.[p] || '')}" data-draft="base:${p}"></label>
-      <p class="hint">${p === 'custom' ? 'OpenAI-совместимый сервер. Нужны HTTPS и разрешённый CORS.' : 'Оставьте пустым для адреса по умолчанию.'}</p>
-      ${modelField(p)}
+      <label class="row field"><span>Название</span><input id="cp-title-${esc(p)}" type="text" value="${esc(cp.title)}" data-custom="title" data-p="${esc(p)}"></label>
+      <label class="row field"><span>Тип API</span><select data-custom="kind" data-p="${esc(p)}">
+        <option value="openai" ${cp.kind !== 'anthropic' ? 'selected' : ''}>OpenAI-совместимый</option>
+        <option value="anthropic" ${cp.kind === 'anthropic' ? 'selected' : ''}>Anthropic-совместимый</option></select></label>
+      <label class="field col"><span>Адрес API (base URL)</span>
+        <input id="cp-base-${esc(p)}" type="url" placeholder="https://api.example.com/v1" value="${esc(cp.base)}" data-custom="base" data-p="${esc(p)}" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      ${cp.kind !== 'anthropic' ? `<label class="row field"><span>Расшифровка аудио</span><select data-custom="stt" data-p="${esc(p)}">
+        <option value="" ${!cp.stt ? 'selected' : ''}>Не использовать</option>
+        <option value="whisper" ${cp.stt === 'whisper' ? 'selected' : ''}>Whisper API</option>
+        <option value="chat" ${cp.stt === 'chat' ? 'selected' : ''}>Модель с аудио</option></select></label>` : ''}
     </section>`;
   }
   h += `<section class="group">
-      <button class="btn wide" data-action="save-key" data-p="${p}">${test?.busy ? '<span class="spinner sm"></span> Проверяю…' : 'Сохранить и проверить'}</button>
-      ${test && !test.busy ? `<p class="${test.ok ? 'ok' : 'bad'}">${test.ok ? '✓' : '✕'} ${esc(test.text)}</p>` : ''}
-      ${settings.hasKey(p) && p !== 'custom' ? `<button class="btn wide ghost danger" data-action="delete-key" data-p="${p}">Удалить ключ</button>` : ''}
+      <label class="field col"><span>API-ключ${custom ? ' (если нужен)' : ''}</span>
+        <input id="key-${esc(p)}" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Вставьте ключ" value="${esc(val)}" data-draft="${esc(k)}">
+      </label>
+      <div class="row gap wrap">
+        <button class="btn small ghost" data-action="paste-key" data-p="${esc(p)}">📋 Вставить</button>
+        <button class="btn small ghost" data-action="reveal-key" data-p="${esc(p)}">👁 Показать</button>
+        ${info.url ? `<a class="btn small ghost" href="${esc(info.url)}" target="_blank" rel="noopener">Получить ключ ↗</a>` : ''}
+      </div>
+      <p class="hint">${esc(info.hint || '')}</p>
+    </section>`;
+  if (info.builtin && p !== 'deepgram') {
+    h += `<section class="group">
+      <label class="field col"><span>Адрес API</span>
+        <input id="base-${esc(p)}" type="url" autocapitalize="off" placeholder="${esc(info.base)}" value="${esc(settings.values.baseURLs?.[p] || '')}" data-draft="base:${esc(p)}"></label>
+      <p class="hint">Оставьте пустым для адреса по умолчанию.</p>
+    </section>`;
+  }
+  if (info.llm) h += `<section class="group">${modelField(p, { label: 'Модель для ИИ и чата' })}</section>`;
+  if (settings.values.proxyURL) {
+    h += `<section class="group"><label class="row toggle-row"><span>Через прокси<small>${esc(settings.values.proxyURL)}</small></span>
+      <input type="checkbox" class="switch" data-setin="useProxy" data-p="${esc(p)}" data-type="bool" ${settings.usesProxy(p) ? 'checked' : ''}></label></section>`;
+  }
+  h += `<section class="group">
+      <button class="btn wide" data-action="save-key" data-p="${esc(p)}">${testKey?.busy ? '<span class="spinner sm"></span> Проверяю…' : 'Сохранить и проверить'}</button>
+      ${testLine(p)}
+      ${settings.sttEngine(p) && p !== 'deepgram' ? `<button class="btn wide ghost" data-action="test-stt" data-p="${esc(p)}">${ui.keyTest['stt:' + p]?.busy ? '<span class="spinner sm"></span> Проверяю…' : '🎧 Проверить расшифровку'}</button>${testLine('stt:' + p)}` : ''}
+      <div class="row gap wrap use-row">
+        ${info.llm ? `<button class="btn small ${settings.values.llmProvider === p ? '' : 'ghost'}" data-action="use-llm" data-p="${esc(p)}">${settings.values.llmProvider === p ? '✓ Используется для ИИ' : 'Использовать для ИИ'}</button>` : ''}
+        ${settings.sttEngine(p) ? `<button class="btn small ${settings.values.batchProvider === p ? '' : 'ghost'}" data-action="use-stt" data-p="${esc(p)}">${settings.values.batchProvider === p ? '✓ Используется для расшифровки' : 'Использовать для расшифровки'}</button>` : ''}
+      </div>
+      ${settings.apiKey(p) ? `<button class="btn wide ghost danger" data-action="delete-key" data-p="${esc(p)}">Удалить ключ</button>` : ''}
+      ${custom ? `<button class="btn wide ghost danger" data-action="remove-provider" data-p="${esc(p)}">Удалить провайдера</button>` : ''}
     </section></div>`;
   return h;
 }
@@ -640,29 +722,57 @@ function viewDevice() {
   return header('Omi', { back: 'settings' }) + `<div class="content settings">${body}</div>`;
 }
 
-function viewHelp() {
+function viewHelp(section) {
+  if (section === 'proxy') return viewProxyHelp();
   return header('Справка', { back: 'settings' }) + `<div class="content">${md(`
 ## Установка на iPhone
 - Откройте этот сайт в **Safari** → кнопка **Поделиться** → **На экран «Домой»**.
 - Запускайте Vox с иконки: так он работает на весь экран, а записи не удаляются автоматически.
 
+## Какие ключи нужны
+- Для **расшифровки** подойдёт любой из вариантов: **Deepgram** (лучший, со спикерами и live-текстом), **Gemini**, **Groq Whisper** (бесплатно), OpenAI, OpenRouter или свой сервер.
+- Для **сводок и чата** — любая нейросеть: Gemini, OpenAI, Claude, Groq, DeepSeek, OpenRouter, Mistral, Grok, Qwen и любые другие с OpenAI-совместимым API (Настройки → Добавить любой другой ИИ).
+- Один ключ может работать сразу для ИИ и расшифровки: например, Gemini или Groq.
+
+## Ошибка 400 / «location is not supported»
+Google (Gemini), OpenAI и Anthropic не обслуживают Россию. Варианты:
+- включить VPN на телефоне;
+- взять **OpenRouter** или **DeepSeek** — они работают из России;
+- сделать свой бесплатный прокси — [инструкция](#/help/proxy).
+
+Если ошибка «ключ не подходит» — скопируйте ключ заново целиком (у Gemini он начинается с «AIza»).
+
 ## Как записывать долго
 - Веб-приложение пишет звук, **пока оно открыто на экране**. Vox не даёт экрану погаснуть во время записи.
 - Не сворачивайте приложение и не блокируйте телефон: iOS остановит микрофон. Если это случилось, Vox продолжит запись новым разговором, когда вы вернётесь.
-- Положите телефон экраном вниз, чтобы не мешала подсветка, или уменьшите яркость.
 - Для фоновой записи с выключенным экраном нужна iOS-версия Vox (сборка в GitHub → Releases).
 
-## Ключи
-- **Deepgram**: console.deepgram.com — при регистрации дают $200 (сотни часов).
-- **Gemini**: aistudio.google.com — бесплатный лимит.
-- **Groq**: console.groq.com — бесплатно, есть Whisper.
-
 ## Где хранятся данные
-Только в этом браузере на телефоне (IndexedDB). Делайте резервную копию в Настройки → Данные → Экспорт.
+Только в этом браузере на телефоне. Делайте резервную копию: Настройки → Данные → Экспорт.
 
 ## Omi
 Safari не поддерживает Bluetooth для сайтов. Используйте браузер **Bluefy** на iPhone или Chrome на Android.
 `)}</div>`;
+}
+
+let proxyCode = null;
+function viewProxyHelp() {
+  if (proxyCode === null) {
+    proxyCode = '';
+    fetch('proxy-worker.js').then(r => r.text()).then(t => { proxyCode = t; render(); }).catch(() => {});
+  }
+  return header('Свой прокси', { back: 'help' }) + `<div class="content">${md(`
+Бесплатный прокси на Cloudflare пропускает запросы к Gemini, OpenAI, Claude и другим ИИ через серверы Cloudflare — так блокировка по стране не срабатывает. Ключи через него только проходят и нигде не сохраняются.
+
+1. Зарегистрируйтесь на **dash.cloudflare.com** (бесплатно, карта не нужна).
+2. Слева **Workers & Pages** → **Create** → **Create Worker** → назовите, например, \`vox-proxy\` → **Deploy**.
+3. Нажмите **Edit code**, удалите всё и вставьте код ниже (кнопка «Скопировать») → **Deploy**.
+4. Скопируйте адрес воркера (вида \`https://vox-proxy.имя.workers.dev\`) и вставьте в Vox: **Настройки → Прокси**.
+5. Готово: Gemini, OpenAI и Claude автоматически пойдут через прокси. Для других провайдеров включите «Через прокси» в их карточке.
+`)}
+    <button class="btn wide" data-action="copy-proxy" ${proxyCode ? '' : 'disabled'}>⧉ Скопировать код прокси</button>
+    <pre class="code">${esc(proxyCode || 'Загрузка…')}</pre>
+    <div class="spacer"></div></div>`;
 }
 
 // ---------------------------------------------------------------- modals
@@ -876,6 +986,7 @@ const actions = {
   },
   'save-key': async (el) => {
     const p = el.dataset.p;
+    const info = settings.provider(p);
     if (ui.drafts[`key:${p}`] !== undefined) settings.setApiKey(p, ui.drafts[`key:${p}`]);
     if (ui.drafts[`base:${p}`] !== undefined) settings.setBaseURL(p, ui.drafts[`base:${p}`]);
     delete ui.drafts[`key:${p}`];
@@ -883,17 +994,53 @@ const actions = {
     render();
     try {
       if (p === 'deepgram') {
-        await verifyDeepgram(settings.apiKey(p));
+        await verifyDeepgram(settings.apiKey(p), settings.deepgramBase);
         ui.keyTest[p] = { ok: true, text: 'Ключ Deepgram работает' };
-      } else {
+      } else if (info.llm) {
         const cfg = settings.llmConfig(p);
         const r = await complete(cfg, 'Отвечай очень кратко.', [{ role: 'user', content: 'Скажи «работает» одним словом.' }]);
-        ui.keyTest[p] = { ok: true, text: `Ответ модели ${cfg.model}: ${r.trim().slice(0, 60)}` };
+        ui.keyTest[p] = { ok: true, text: `Работает. Ответ модели ${cfg.model}: ${r.trim().slice(0, 60)}` };
+        if (!settings.hasKey(settings.values.llmProvider)) settings.set('llmProvider', p);
+      } else {
+        ui.keyTest[p] = { ok: true, text: 'Сохранено' };
       }
     } catch (e) {
       ui.keyTest[p] = { ok: false, text: e.message || String(e) };
     }
     render();
+  },
+  'test-stt': async (el) => {
+    const p = el.dataset.p;
+    if (ui.drafts[`key:${p}`] !== undefined) { settings.setApiKey(p, ui.drafts[`key:${p}`]); delete ui.drafts[`key:${p}`]; }
+    const k = 'stt:' + p;
+    ui.keyTest[k] = { busy: true };
+    render();
+    try {
+      const prev = settings.values.batchProvider;
+      settings.values.batchProvider = p; // build options for this provider without saving
+      const o = settings.batchOptions();
+      settings.values.batchProvider = prev;
+      await verifyTranscription(o);
+      ui.keyTest[k] = { ok: true, text: `Расшифровка через ${settings.title(p)} (${o.model}) работает` };
+    } catch (e) {
+      ui.keyTest[k] = { ok: false, text: e.message || String(e) };
+    }
+    render();
+  },
+  'use-llm': (el) => { settings.set('llmProvider', el.dataset.p); toast(`ИИ: ${settings.title(el.dataset.p)}`); },
+  'use-stt': (el) => { settings.set('batchProvider', el.dataset.p); toast(`Расшифровка: ${settings.title(el.dataset.p)}`); },
+  'add-provider': (el) => {
+    const preset = PRESETS[Number(el.dataset.i)] || {};
+    const id = settings.addCustomProvider(preset);
+    go(`settings/key/${id}`);
+  },
+  'remove-provider': (el) => {
+    if (!confirm('Удалить этого провайдера и его ключ?')) return;
+    settings.removeCustomProvider(el.dataset.p);
+    go('settings');
+  },
+  'copy-proxy': async () => {
+    try { await navigator.clipboard.writeText(proxyCode); toast('Код скопирован'); } catch { toast('Выделите код и скопируйте вручную', 'error'); }
   },
   'delete-key': (el) => { settings.setApiKey(el.dataset.p, ''); delete ui.drafts[`key:${el.dataset.p}`]; ui.keyTest[el.dataset.p] = null; render(); },
   'omi-pair': async () => {
@@ -986,6 +1133,11 @@ document.addEventListener('change', (e) => {
     settings.set(el.dataset.setting, v);
   }
   if (el.dataset.model) settings.setModel(el.dataset.model, el.value);
+  if (el.dataset.setin) {
+    const v = el.dataset.type === 'bool' ? el.checked : el.value.trim();
+    settings.setIn(el.dataset.setin, el.dataset.p, v);
+  }
+  if (el.dataset.custom) settings.updateCustomProvider(el.dataset.p, { [el.dataset.custom]: el.value.trim() || (el.dataset.custom === 'stt' ? null : '') });
 });
 
 document.addEventListener('keydown', (e) => {
@@ -1026,12 +1178,12 @@ recorder.on('interim', onText);
 store.on('change', () => {
   // Avoid re-rendering under the user's fingers while typing in settings fields.
   const a = document.activeElement;
-  if (a && $view.contains(a) && (a.dataset.setting || a.dataset.model) && route()[0] === 'settings') return;
+  if (a && $view.contains(a) && (a.dataset.setting || a.dataset.model || a.dataset.setin || a.dataset.custom) && route()[0] === 'settings') return;
   render();
 });
 settings.on('change', (k) => {
   const a = document.activeElement;
-  if (a && (a.dataset.setting === k) && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) return;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && (a.dataset.setting === k || a.dataset.setin === k || (a.dataset.custom && k === 'customProviders') || (a.dataset.model && (k === 'models' || k === 'customProviders')))) return;
   render();
 });
 omi.on('change', render);

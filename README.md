@@ -20,6 +20,15 @@ Vox записывает разговоры с микрофона iPhone или 
 - кулон Omi через Web Bluetooth работает в браузере **Bluefy** на iPhone и в Chrome на Android/компьютере.
   Safari Bluetooth не поддерживает.
 
+Ключи — от любых нейросетей: встроены Deepgram, Gemini, OpenAI, Groq, OpenRouter, Claude, DeepSeek, а через
+«Настройки → Добавить любой другой ИИ» подключается любой сервис с OpenAI- или Anthropic-совместимым API
+(Mistral, Grok, Qwen, Kimi, Together, Fireworks, Cerebras, Perplexity, Ollama…). Расшифровывать файлы умеют
+Deepgram, Whisper-совместимые сервисы и модели с аудиовходом (Gemini).
+
+Gemini, OpenAI и Claude не работают из России (ошибка 400 «location is not supported»): включите VPN, используйте
+OpenRouter/DeepSeek или поднимите бесплатный прокси на Cloudflare — код в [`web/proxy-worker.js`](web/proxy-worker.js),
+инструкция в приложении (Справка → прокси).
+
 Для записи с заблокированным экраном и фонового подключения Omi нужна iOS-сборка (ниже).
 
 Код веб-версии — в папке [`web/`](web/). Это чистый JavaScript без сборки; публикуется на GitHub Pages

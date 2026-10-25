@@ -102,8 +102,11 @@ export const processing = {
       } else {
         store.update(id, x => { x.status = 'transcribing'; x.errorMessage = null; });
         try {
-          const segs = await transcribeBatch(audio, settings.batchOptions());
+          const opts = settings.batchOptions();
+          opts.onProgress = (i, n) => store.update(id, x => { x.progressText = n > 1 ? `(часть ${i + 1} из ${n})` : ''; }, { persist: false });
+          const segs = await transcribeBatch(audio, opts);
           store.update(id, x => {
+            delete x.progressText;
             if (segs.length || !x.segments.length) {
               const names = x.speakerNames;
               x.segments = segs;

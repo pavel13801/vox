@@ -1,6 +1,6 @@
-// Speech-to-text: Deepgram live (WebSocket) and batch (Deepgram / Whisper-compatible).
+// Speech-to-text: Deepgram live (WebSocket) and batch (Deepgram / Whisper-compatible / audio-capable chat models).
 import { uuid, wavFromPCM16, extForMime } from './util.js';
-import { extractError } from './llm.js';
+import { friendlyError, request, extractJSONObject } from './llm.js';
 
 // ---------------------------------------------------------------- live
 
@@ -9,8 +9,8 @@ import { extractError } from './llm.js';
  * Auth uses the WebSocket sub-protocol ["token", KEY] (browsers cannot set headers).
  */
 export class DeepgramLive {
-  constructor({ apiKey, model, language, sampleRate, diarize, keyterms }) {
-    this.o = { apiKey, model, language, sampleRate, diarize, keyterms: keyterms || [] };
+  constructor({ apiKey, model, language, sampleRate, diarize, keyterms, endpoint }) {
+    this.o = { apiKey, model, language, sampleRate, diarize, keyterms: keyterms || [], endpoint: endpoint || 'wss://api.deepgram.com/v1/listen' };
     this.onStatus = () => {};
     this.onResult = () => {};
     this.ws = null;
@@ -41,7 +41,7 @@ export class DeepgramLive {
     if (this.o.diarize) p.append('diarize', 'true');
     const termKey = this.o.model.startsWith('nova-3') ? 'keyterm' : 'keywords';
     for (const t of this.o.keyterms.slice(0, 50)) p.append(termKey, t);
-    return `wss://api.deepgram.com/v1/listen?${p}`;
+    return `${this.o.endpoint}?${p}`;
   }
 
   start() {
@@ -252,18 +252,18 @@ export function mergeSameSpeaker(segs, maxGap = 3, maxChars = 1200) {
   return out;
 }
 
-function httpError(service, status, body) {
-  const d = extractError(body);
-  if (status === 401 || status === 403) return new Error(`${service}: неверный API-ключ или нет доступа (${status}). ${d}`);
-  if (status === 402) return new Error(`${service}: закончился баланс. ${d}`);
-  if (status === 429) return new Error(`${service}: превышен лимит запросов, попробуйте позже. ${d}`);
-  if (status === 413) return new Error(`${service}: файл слишком большой. ${d}`);
-  return new Error(`${service}: ошибка ${status}. ${d}`);
-}
+const httpError = (service, status, body, model) => new Error(friendlyError(service, status, body, model));
+const trimBase = (u) => String(u || '').replace(/\/+$/, '');
 
+/**
+ * o: { engine: 'deepgram'|'whisper'|'chat', apiKey, baseURL, model, language, diarize, keyterms, apiTitle, custom, onProgress? }
+ */
 export async function transcribeBatch(blob, o) {
-  if (!o.apiKey) throw new Error(`Нет API-ключа для ${o.apiTitle}. Добавьте его в Настройках.`);
-  if (o.provider === 'deepgram') return deepgramBatch(blob, o);
+  if (!o.engine) throw new Error(`${o.apiTitle} не умеет расшифровывать аудио. Выберите другой сервис в Настройки → Расшифровка файла.`);
+  if (!o.apiKey && !o.custom) throw new Error(`Нет API-ключа для ${o.apiTitle}. Добавьте его в Настройки → Ключи и провайдеры.`);
+  if (!o.model) throw new Error(`Не выбрана модель расшифровки для ${o.apiTitle}.`);
+  if (o.engine === 'deepgram') return deepgramBatch(blob, o);
+  if (o.engine === 'chat') return chatAudioBatch(blob, o);
   return whisperBatch(blob, o);
 }
 
@@ -274,13 +274,13 @@ async function deepgramBatch(blob, o) {
   if (o.diarize) p.append('diarize', 'true');
   const termKey = o.model.startsWith('nova-3') ? 'keyterm' : 'keywords';
   for (const t of o.keyterms.slice(0, 50)) p.append(termKey, t);
-  const res = await fetch(`https://api.deepgram.com/v1/listen?${p}`, {
+  const res = await request(`${trimBase(o.baseURL)}/listen?${p}`, {
     method: 'POST',
     headers: { Authorization: `Token ${o.apiKey}`, 'Content-Type': blob.type || 'application/octet-stream' },
     body: blob,
-  });
+  }, 'Deepgram');
   const text = await res.text();
-  if (!res.ok) throw httpError('Deepgram', res.status, text);
+  if (!res.ok) throw httpError('Deepgram', res.status, text, o.model);
   const j = JSON.parse(text);
   const utts = j.results?.utterances || [];
   if (utts.length) {
@@ -305,33 +305,34 @@ async function deepgramBatch(blob, o) {
   return segs;
 }
 
+// ---- Whisper-compatible (/audio/transcriptions): OpenAI, Groq, Fireworks, local servers…
+
 const WHISPER_LIMIT = 24 * 1024 * 1024;
 
 async function whisperBatch(blob, o) {
-  let parts;
-  if (blob.size <= WHISPER_LIMIT) {
-    parts = [{ blob, offset: 0, name: `audio.${extForMime(blob.type)}` }];
-  } else {
-    parts = await splitToWavChunks(blob, 600);
-  }
+  const parts = blob.size <= WHISPER_LIMIT
+    ? [{ blob, offset: 0, name: `audio.${extForMime(blob.type)}` }]
+    : await splitToWavChunks(blob, 600);
   const all = [];
-  for (const part of parts) all.push(...await whisperChunk(part, o));
+  for (let i = 0; i < parts.length; i++) {
+    o.onProgress?.(i, parts.length);
+    all.push(...await whisperChunk(parts[i], o));
+  }
   return mergeSameSpeaker(all, 2, 900);
 }
 
 async function whisperChunk(part, o) {
-  const verbose = o.model.includes('whisper');
+  const verbose = /whisper/i.test(o.model);
   const fd = new FormData();
   fd.append('model', o.model);
   if (o.language && o.language !== 'multi') fd.append('language', o.language);
   fd.append('response_format', verbose ? 'verbose_json' : 'json');
   if (o.keyterms.length) fd.append('prompt', o.keyterms.join(', '));
   fd.append('file', part.blob, part.name);
-  const res = await fetch(`${o.baseURL.replace(/\/+$/, '')}/audio/transcriptions`, {
-    method: 'POST', headers: { Authorization: `Bearer ${o.apiKey}` }, body: fd,
-  });
+  const headers = o.apiKey ? { Authorization: `Bearer ${o.apiKey}` } : {};
+  const res = await request(`${trimBase(o.baseURL)}/audio/transcriptions`, { method: 'POST', headers, body: fd }, o.apiTitle);
   const text = await res.text();
-  if (!res.ok) throw httpError(o.apiTitle, res.status, text);
+  if (!res.ok) throw httpError(o.apiTitle, res.status, text, o.model);
   const j = JSON.parse(text);
   if (Array.isArray(j.segments) && j.segments.length) {
     return j.segments.map(s => ({
@@ -342,46 +343,148 @@ async function whisperChunk(part, o) {
   return t ? [{ id: uuid(), speaker: 0, text: t, start: part.offset, end: part.offset }] : [];
 }
 
-/** Decodes audio and re-encodes 16 kHz mono WAV chunks (for size-limited APIs). */
-async function splitToWavChunks(blob, chunkSeconds) {
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+// ---- Any chat model that accepts audio (Gemini, OpenRouter audio models, GPT-4o audio…)
+
+const LANG_NAMES = {
+  ru: 'русском', en: 'английском', uk: 'украинском', de: 'немецком', es: 'испанском', fr: 'французском',
+  it: 'итальянском', pt: 'португальском', tr: 'турецком', kk: 'казахском',
+};
+
+function transcriptionPrompt(o) {
+  const lang = o.language === 'multi' || !LANG_NAMES[o.language]
+    ? 'на языке оригинала (если языки смешаны — каждую фразу на её языке)'
+    : `на ${LANG_NAMES[o.language]} языке (иностранные слова оставляй как произнесены)`;
+  const speakers = o.diarize
+    ? 'Раздели речь по говорящим: Спикер 1, Спикер 2 и т. д. Если голос один — все реплики от Спикера 1.'
+    : 'Все реплики относи к Спикеру 1.';
+  const terms = o.keyterms.length ? `\nВозможные имена и термины: ${o.keyterms.join(', ')}.` : '';
+  return [
+    `Сделай дословную расшифровку этой аудиозаписи ${lang}.`,
+    speakers,
+    'Верни ТОЛЬКО JSON без пояснений:',
+    '{"segments":[{"speaker":1,"start":"MM:SS","text":"реплика"}]}',
+    '— каждая реплика или законченная мысль отдельным элементом; start — время начала от начала этого фрагмента.',
+    'Пиши всё, что сказано, без сокращений и пересказа, с пунктуацией. Не добавляй ничего от себя. Если речи нет — {"segments":[]}.' + terms,
+  ].join('\n');
+}
+
+function parseTime(v) {
+  if (typeof v === 'number') return v;
+  const parts = String(v || '0').trim().split(':').map(Number);
+  if (parts.some(Number.isNaN)) return 0;
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+async function chatAudioBatch(blob, o) {
+  // 5-minute 16 kHz WAV pieces: ~9.6 MB each (~13 MB base64) — inside the inline limits of Gemini/OpenRouter.
+  const parts = await splitToWavChunks(blob, 300);
+  const all = [];
+  for (let i = 0; i < parts.length; i++) {
+    o.onProgress?.(i, parts.length);
+    all.push(...await chatAudioChunk(parts[i], o));
+  }
+  return mergeSameSpeaker(all, 3, 1200);
+}
+
+async function blobToBase64(blob) {
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  const step = 0x8000;
+  for (let i = 0; i < buf.length; i += step) bin += String.fromCharCode.apply(null, buf.subarray(i, i + step));
+  return btoa(bin);
+}
+
+async function chatAudioChunk(part, o) {
+  const data = await blobToBase64(part.blob);
+  const headers = { 'Content-Type': 'application/json' };
+  if (o.apiKey) headers.Authorization = `Bearer ${o.apiKey}`;
+  const body = {
+    model: o.model,
+    messages: [{
+      role: 'user', content: [
+        { type: 'text', text: transcriptionPrompt(o) },
+        { type: 'input_audio', input_audio: { data, format: 'wav' } },
+      ],
+    }],
+    response_format: { type: 'json_object' },
+  };
+  const url = `${trimBase(o.baseURL)}/chat/completions`;
+  let res = await request(url, { method: 'POST', headers, body: JSON.stringify(body) }, o.apiTitle);
+  let text = await res.text();
+  if (res.status === 400 && /response_format|json_object/i.test(text)) {
+    delete body.response_format;
+    res = await request(url, { method: 'POST', headers, body: JSON.stringify(body) }, o.apiTitle);
+    text = await res.text();
+  }
+  if (!res.ok) {
+    if (res.status === 400 && /input_audio|audio input|modalit|does not support audio/i.test(text) && !/location|api key/i.test(text)) {
+      throw new Error(`${o.apiTitle}: модель «${o.model}» не принимает аудио. Выберите модель с поддержкой звука (например, Gemini).`);
+    }
+    throw httpError(o.apiTitle, res.status, text, o.model);
+  }
+  const j = JSON.parse(text);
+  const content = j.choices?.[0]?.message?.content;
+  const reply = Array.isArray(content) ? content.map(c => c.text || '').join('') : String(content || '');
+  const obj = extractJSONObject(reply);
+  const list = Array.isArray(obj?.segments) ? obj.segments : null;
+  if (!list) {
+    const plain = reply.trim();
+    return plain ? [{ id: uuid(), speaker: 0, text: plain, start: part.offset, end: part.offset + part.duration }] : [];
+  }
+  const segs = list.map(x => ({
+    id: uuid(),
+    speaker: Math.max(0, (parseInt(x.speaker, 10) || 1) - 1),
+    text: String(x.text || '').trim(),
+    start: part.offset + Math.min(parseTime(x.start), part.duration),
+    end: 0,
+  })).filter(x => x.text);
+  for (let i = 0; i < segs.length; i++) segs[i].end = i + 1 < segs.length ? segs[i + 1].start : part.offset + part.duration;
+  return segs;
+}
+
+// ---- audio helpers
+
+/** Decodes audio straight to 16 kHz mono (≈6× less memory than 48 kHz stereo) and cuts WAV pieces. */
+export async function splitToWavChunks(blob, chunkSeconds) {
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const ctx = new OAC(1, 16000, 16000);
   let decoded;
   try {
     decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
-  } finally {
-    ctx.close?.();
+  } catch (e) {
+    throw new Error(`Не удалось прочитать аудиофайл (${blob.type || 'неизвестный формат'}). Попробуйте Deepgram — он принимает любые форматы.`);
   }
-  const pcm = await resampleTo16k(decoded);
-  const per = chunkSeconds * 16000;
+  const rate = decoded.sampleRate;
+  const chans = [];
+  for (let c = 0; c < decoded.numberOfChannels; c++) chans.push(decoded.getChannelData(c));
+  const per = Math.floor(chunkSeconds * rate);
   const parts = [];
-  for (let i = 0, k = 0; i < pcm.length; i += per, k++) {
-    parts.push({ blob: wavFromPCM16(pcm.subarray(i, Math.min(pcm.length, i + per)), 16000), offset: i / 16000, name: `chunk_${k}.wav` });
+  for (let i = 0, k = 0; i < decoded.length; i += per, k++) {
+    const n = Math.min(per, decoded.length - i);
+    const out = new Int16Array(n);
+    for (let j = 0; j < n; j++) {
+      let v = 0;
+      for (const ch of chans) v += ch[i + j];
+      v = Math.max(-1, Math.min(1, v / chans.length));
+      out[j] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
+    parts.push({ blob: wavFromPCM16(out, rate), offset: i / rate, duration: n / rate, name: `chunk_${k}.wav` });
   }
   return parts;
 }
 
-export async function resampleTo16k(audioBuffer) {
-  const frames = Math.ceil(audioBuffer.duration * 16000);
-  const off = new OfflineAudioContext(1, Math.max(1, frames), 16000);
-  const src = off.createBufferSource();
-  src.buffer = audioBuffer;
-  src.connect(off.destination);
-  src.start();
-  const rendered = await off.startRendering();
-  const f = rendered.getChannelData(0);
-  const out = new Int16Array(f.length);
-  for (let i = 0; i < f.length; i++) {
-    const v = Math.max(-1, Math.min(1, f[i]));
-    out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
-  }
-  return out;
+/** Cheap key check: transcribe 0.5 s of silence. */
+export async function verifyDeepgram(key, baseURL = 'https://api.deepgram.com/v1') {
+  const silent = wavFromPCM16(new Int16Array(8000), 16000);
+  const res = await request(`${trimBase(baseURL)}/listen?model=nova-3&language=ru`, {
+    method: 'POST', headers: { Authorization: `Token ${key}`, 'Content-Type': 'audio/wav' }, body: silent,
+  }, 'Deepgram');
+  if (!res.ok) throw httpError('Deepgram', res.status, await res.text(), 'nova-3');
 }
 
-/** Cheap key check: transcribe 0.5 s of silence. */
-export async function verifyDeepgram(key) {
-  const silent = wavFromPCM16(new Int16Array(8000), 16000);
-  const res = await fetch('https://api.deepgram.com/v1/listen?model=nova-3&language=ru', {
-    method: 'POST', headers: { Authorization: `Token ${key}`, 'Content-Type': 'audio/wav' }, body: silent,
-  });
-  if (!res.ok) throw httpError('Deepgram', res.status, await res.text());
+/** Checks a transcription setup end-to-end on 1 s of near-silence. */
+export async function verifyTranscription(o) {
+  const pcm = new Int16Array(16000);
+  for (let i = 0; i < pcm.length; i++) pcm[i] = Math.round(Math.sin(i / 8) * 200);
+  return transcribeBatch(wavFromPCM16(pcm, 16000), o);
 }
