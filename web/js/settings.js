@@ -118,6 +118,40 @@ const DEFAULTS = {
 
 const KEY = 'vox.settings.v1';
 const KEYS = 'vox.keys.v1';
+const COOL = 'vox.keyPause.v1';
+
+/** Short non-reversible id of a key, used to remember its pause. */
+function keyId(key) {
+  let h = 5381;
+  for (let i = 0; i < key.length; i++) h = ((h << 5) + h + key.charCodeAt(i)) >>> 0;
+  return `${h.toString(36)}${key.length}`;
+}
+
+/** Milliseconds until the next midnight in California — when Google resets daily Gemini quotas. */
+function msUntilPacificMidnight() {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23',
+  }).formatToParts(new Date()).map(x => [x.type, x.value]));
+  const passed = (Number(parts.hour) * 3600 + Number(parts.minute) * 60 + Number(parts.second)) * 1000;
+  return Math.max(60_000, 86_400_000 - passed + 60_000);
+}
+
+/** Decides whether an API error means "this key is used up — try the next one", and for how long. */
+export function keyPause(e) {
+  const status = e.status || 0;
+  const text = `${e.body || ''} ${e.message || ''}`;
+  if (/location is not supported|unsupported_country|country, region, or territory|not available in your (country|region)/i.test(text)) return null;
+  if (status === 429 || /resource_exhausted|quota|rate.?limit|too many requests/i.test(text)) {
+    if (/per ?day|perday|daily|requests per day|RPD/i.test(text)) return { ms: msUntilPacificMidnight(), reason: 'дневной лимит исчерпан' };
+    const m = text.match(/retry(?:Delay)?["\s:]*(?:in\s*)?"?([\d.]+)\s*s/i);
+    const sec = m ? Math.ceil(Number(m[1])) + 2 : 65;
+    return { ms: Math.min(sec, 3600) * 1000, reason: 'лимит запросов в минуту' };
+  }
+  if (status === 402 || /insufficient|balance|out of credit|credits? exhausted|payment required/i.test(text)) return { ms: 86_400_000, reason: 'закончились деньги на счёте' };
+  if (status === 401 || /api key not valid|api_key_invalid|pass a valid api key|invalid[_ ]api[_ ]key|incorrect api key|invalid x-api-key|invalid credentials/i.test(text)) return { ms: 3_600_000, reason: 'ключ не принят' };
+  if (status === 403) return { ms: 3_600_000, reason: 'нет доступа' };
+  return null;
+}
 
 class Settings extends Emitter {
   constructor() {
@@ -126,6 +160,8 @@ class Settings extends Emitter {
     try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch {}
     this.values = { ...DEFAULTS, ...saved };
     try { this.keys = JSON.parse(localStorage.getItem(KEYS) || '{}'); } catch { this.keys = {}; }
+    try { this.cooldown = JSON.parse(localStorage.getItem(COOL) || '{}'); } catch { this.cooldown = {}; }
+    this.lastUsed = {};
     this.migrate();
   }
 
@@ -213,19 +249,91 @@ class Settings extends Emitter {
 
   // ---------------------------------------------------------------- keys, models, URLs
 
-  apiKey(p) { return this.keys[p] || ''; }
-  setApiKey(p, v) {
-    const t = String(v || '').trim();
-    if (t) this.keys[p] = t; else delete this.keys[p];
+  // Several keys per provider (e.g. three Gemini accounts). When one hits its limit it is put on a pause
+  // and the next one is used automatically.
+
+  apiKeys(p) {
+    const v = this.keys[p];
+    return (Array.isArray(v) ? v : v ? [v] : []).map(k => String(k).trim()).filter(Boolean);
+  }
+
+  setApiKeys(p, list) {
+    const clean = [...new Set((list || []).map(k => String(k || '').trim()).filter(Boolean))];
+    if (clean.length) this.keys[p] = clean; else delete this.keys[p];
     localStorage.setItem(KEYS, JSON.stringify(this.keys));
     this.emit('change', 'keys');
+  }
+
+  /** The key that will be used now: the first one that is not on a pause. */
+  apiKey(p) { return this.orderedKeys(p)[0] || ''; }
+  setApiKey(p, v) { this.setApiKeys(p, v ? [v] : []); }
+
+  keyStatus(p, key) {
+    const s = this.cooldown[`${p}:${keyId(key)}`];
+    if (!s) return null;
+    if (s.until && s.until <= Date.now()) return null;
+    return s;
+  }
+
+  markKey(p, key, ms, reason) {
+    if (!key) return;
+    this.cooldown[`${p}:${keyId(key)}`] = { until: Date.now() + ms, reason, at: Date.now() };
+    localStorage.setItem(COOL, JSON.stringify(this.cooldown));
+    this.emit('change', 'keys');
+  }
+
+  clearKey(p, key) {
+    const id = `${p}:${keyId(key)}`;
+    if (!this.cooldown[id]) return;
+    delete this.cooldown[id];
+    localStorage.setItem(COOL, JSON.stringify(this.cooldown));
+    this.emit('change', 'keys');
+  }
+
+  /** Available keys first (in the user's order), then paused ones by the time they come back. */
+  orderedKeys(p) {
+    const keys = this.apiKeys(p);
+    const free = keys.filter(k => !this.keyStatus(p, k));
+    const paused = keys.filter(k => this.keyStatus(p, k)).sort((a, b) => this.keyStatus(p, a).until - this.keyStatus(p, b).until);
+    return [...free, ...paused];
+  }
+
+  /**
+   * Runs fn(key) with the provider's keys, switching to the next key when the current one is out of quota,
+   * out of money or rejected. fixedKey — test exactly this key (no rotation).
+   */
+  async withKeys(p, fn, { fixedKey } = {}) {
+    const keys = fixedKey !== undefined ? [fixedKey] : this.orderedKeys(p);
+    if (!keys.length) return fn('');
+    let lastErr = null;
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      try {
+        const r = await fn(key);
+        this.clearKey(p, key);
+        this.lastUsed[p] = key;
+        return r;
+      } catch (e) {
+        const pause = e && !e.noRotate ? keyPause(e) : null;
+        if (!pause) throw e;
+        this.markKey(p, key, pause.ms, pause.reason);
+        lastErr = e;
+        if (fixedKey !== undefined) throw e;
+      }
+    }
+    if (keys.length > 1) {
+      const back = Math.min(...keys.map(k => this.keyStatus(p, k)?.until || Infinity));
+      const when = Number.isFinite(back) ? ` Ближайший освободится в ${new Date(back).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}.` : '';
+      lastErr.message = `${lastErr.message}\n\nВсе ключи (${keys.length}) сейчас на паузе.${when}`;
+    }
+    throw lastErr;
   }
 
   hasKey(p) {
     const info = this.provider(p);
     if (!info) return false;
     if (!info.builtin) return !!(info.base);
-    return !!this.apiKey(p);
+    return this.apiKeys(p).length > 0;
   }
 
   model(p) { return this.values.models?.[p] || this.provider(p)?.model || ''; }

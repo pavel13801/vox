@@ -318,3 +318,12 @@ h3 { font-size: 17px; margin: 18px 0 8px; }
 .use-row { margin: 10px 0 4px; }
 pre.code { background: var(--card); border-radius: 12px; padding: 12px; font-size: 12px; line-height: 1.45; overflow-x: auto; white-space: pre; box-shadow: var(--shadow); -webkit-user-select: text; user-select: text; }
 .settings .group h3 .muted { text-transform: none; }
+.key-row { padding: 10px 0; border-bottom: 0.5px solid var(--line); }
+.key-row .row { border: 0 !important; min-height: 0 !important; padding: 0 !important; }
+.key-row .row.gap { margin-top: 6px; }
+.key-row input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; }
+.key-badge { font-size: 12px; color: var(--muted); background: var(--card2); border-radius: 999px; padding: 2px 8px; }
+.key-badge.active { color: var(--green); background: rgba(34, 164, 71, 0.12); }
+.key-badge.paused { color: var(--orange); background: rgba(245, 158, 11, 0.14); }
+.warn-text { color: var(--orange); }
+.key-row b { white-space: nowrap; margin-right: 8px; }

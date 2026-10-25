@@ -1,4 +1,5 @@
 // Browser client for OpenAI-compatible chat APIs and the Anthropic Messages API.
+import { settings } from './settings.js';
 
 export function extractError(text) {
   try {
@@ -41,8 +42,11 @@ export async function request(url, init, title) {
 }
 
 class HTTPError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, body = '') { super(message); this.status = status; this.body = body; }
 }
+
+/** Error with a readable message that still carries status/body, so key rotation can see the reason. */
+export const apiError = (title, status, body, model) => new HTTPError(status, friendlyError(title, status, body, model), body);
 
 function ensure(cfg) {
   if (!cfg.custom && !cfg.apiKey) throw new Error(`Нет API-ключа для ${cfg.title}. Добавьте его в Настройки → Ключи и провайдеры.`);
@@ -78,7 +82,7 @@ async function completeOnce(cfg, system, messages, json, signal) {
   const { url, init } = buildRequest(cfg, system, messages, { json });
   const res = await request(url, { ...init, signal }, cfg.title);
   const text = await res.text();
-  if (!res.ok) throw new HTTPError(res.status, friendlyError(cfg.title, res.status, text, cfg.model));
+  if (!res.ok) throw apiError(cfg.title, res.status, text, cfg.model);
   const j = JSON.parse(text);
   if (cfg.kind === 'anthropic') {
     const out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
@@ -94,24 +98,41 @@ async function completeOnce(cfg, system, messages, json, signal) {
   throw new Error('Модель вернула пустой ответ');
 }
 
+/** Runs a request with the provider's keys, switching to the next key when one runs out (see settings.withKeys). */
+const withKeys = (cfg, fn) => settings.withKeys(cfg.provider, (key) => fn({ ...cfg, apiKey: key }), { fixedKey: cfg.fixedKey });
+
 export async function complete(cfg, system, messages, { json = false, signal } = {}) {
-  try {
-    return await completeOnce(cfg, system, messages, json, signal);
-  } catch (e) {
-    if (json && e instanceof HTTPError && e.status === 400) {
-      return await completeOnce(cfg, system, messages, false, signal);
+  return withKeys(cfg, async (c) => {
+    try {
+      return await completeOnce(c, system, messages, json, signal);
+    } catch (e) {
+      if (json && e instanceof HTTPError && e.status === 400 && /response_format|json/i.test(e.body)) {
+        return await completeOnce(c, system, messages, false, signal);
+      }
+      throw e;
     }
-    throw e;
-  }
+  });
 }
 
 /** Streams text pieces; calls onPiece for each. Returns the full text. */
 export async function stream(cfg, system, messages, onPiece, signal) {
+  return withKeys(cfg, async (c) => {
+    let emitted = false;
+    try {
+      return await streamOnce(c, system, messages, (p) => { emitted = true; onPiece(p); }, signal);
+    } catch (e) {
+      if (emitted) e.noRotate = true; // part of the answer is already shown — do not repeat it with another key
+      throw e;
+    }
+  });
+}
+
+async function streamOnce(cfg, system, messages, onPiece, signal) {
   const { url, init } = buildRequest(cfg, system, messages, { stream: true });
   const res = await request(url, { ...init, signal }, cfg.title);
-  if (!res.ok) throw new Error(friendlyError(cfg.title, res.status, await res.text(), cfg.model));
+  if (!res.ok) throw apiError(cfg.title, res.status, await res.text(), cfg.model);
   if (!res.body || !res.body.getReader) {
-    const full = await complete(cfg, system, messages, { signal });
+    const full = await completeOnce(cfg, system, messages, false, signal);
     onPiece(full);
     return full;
   }
@@ -131,7 +152,7 @@ export async function stream(cfg, system, messages, onPiece, signal) {
       if (payload === '[DONE]') continue;
       let obj;
       try { obj = JSON.parse(payload); } catch { continue; }
-      if (obj.error?.message) throw new Error(obj.error.message);
+      if (obj.error?.message) throw new HTTPError(obj.error.code || 0, friendlyError(cfg.title, obj.error.code || 0, payload, cfg.model), payload);
       let piece = '';
       if (cfg.kind === 'anthropic') {
         if (obj.type === 'content_block_delta') piece = obj.delta?.text || '';
@@ -142,13 +163,17 @@ export async function stream(cfg, system, messages, onPiece, signal) {
     }
   }
   if (!full) {
-    full = await complete(cfg, system, messages, { signal });
+    full = await completeOnce(cfg, system, messages, false, signal);
     onPiece(full);
   }
   return full;
 }
 
 export async function listModels(cfg) {
+  return withKeys(cfg, listModelsOnce);
+}
+
+async function listModelsOnce(cfg) {
   const headers = {};
   if (cfg.kind === 'anthropic') {
     headers['x-api-key'] = cfg.apiKey;
@@ -159,7 +184,7 @@ export async function listModels(cfg) {
   }
   const res = await request(`${base(cfg)}/models`, { headers }, cfg.title);
   const text = await res.text();
-  if (!res.ok) throw new Error(friendlyError(cfg.title, res.status, text, cfg.model));
+  if (!res.ok) throw apiError(cfg.title, res.status, text, cfg.model);
   const j = JSON.parse(text);
   const list = j.data || j.models || [];
   const skip = ['embedding', 'embed', 'tts', 'whisper', 'dall-e', 'image', 'moderation', 'audio', 'transcribe', 'realtime', 'guard'];

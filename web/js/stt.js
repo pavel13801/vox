@@ -1,6 +1,7 @@
 // Speech-to-text: Deepgram live (WebSocket) and batch (Deepgram / Whisper-compatible / audio-capable chat models).
 import { uuid, wavFromPCM16, extForMime } from './util.js';
-import { friendlyError, request, extractJSONObject } from './llm.js';
+import { apiError, request, extractJSONObject } from './llm.js';
+import { settings } from './settings.js';
 
 // ---------------------------------------------------------------- live
 
@@ -9,8 +10,13 @@ import { friendlyError, request, extractJSONObject } from './llm.js';
  * Auth uses the WebSocket sub-protocol ["token", KEY] (browsers cannot set headers).
  */
 export class DeepgramLive {
-  constructor({ apiKey, model, language, sampleRate, diarize, keyterms, endpoint }) {
+  constructor({ apiKey, apiKeys, model, language, sampleRate, diarize, keyterms, endpoint, onKeyFailed }) {
     this.o = { apiKey, model, language, sampleRate, diarize, keyterms: keyterms || [], endpoint: endpoint || 'wss://api.deepgram.com/v1/listen' };
+    // Several keys: when a connection is refused with one key, the next key is tried.
+    this.keys = (apiKeys && apiKeys.length ? apiKeys : [apiKey]).filter(Boolean);
+    this.keyIndex = 0;
+    this.refusedInRow = 0;
+    this.onKeyFailed = onKeyFailed || (() => {});
     this.onStatus = () => {};
     this.onResult = () => {};
     this.ws = null;
@@ -63,7 +69,7 @@ export class DeepgramLive {
     this.onStatus(this.attempt === 0 ? 'connecting' : 'reconnecting');
     let ws;
     try {
-      ws = new WebSocket(this.url(), ['token', this.o.apiKey]);
+      ws = new WebSocket(this.url(), ['token', this.keys[this.keyIndex] || this.o.apiKey]);
     } catch (e) {
       this.failed = true;
       this.onStatus('failed', 'Не удалось подключиться к Deepgram');
@@ -75,6 +81,7 @@ export class DeepgramLive {
     ws.onopen = () => {
       if (ws !== this.ws) return;
       opened = true;
+      this.refusedInRow = 0;
       this.open = true;
       this.everOpened = true;
       this.attempt = 0;
@@ -91,7 +98,15 @@ export class DeepgramLive {
       if (this.finishing) { this.complete(); return; }
       if (!this.running) return;
       // Browsers hide the HTTP status; 1008/4xxx or an immediate close usually means a bad key/params.
-      if (!opened && this.attempt >= 2 && !this.everOpened) {
+      if (!opened) {
+        this.refusedInRow++;
+        // Two refusals in a row with this key (likely out of balance or invalid) → switch to the next key.
+        if (this.keys.length > 1 && !this.everOpened && this.refusedInRow % 2 === 0) {
+          this.onKeyFailed(this.keys[this.keyIndex]);
+          this.keyIndex = (this.keyIndex + 1) % this.keys.length;
+        }
+      }
+      if (!opened && !this.everOpened && this.refusedInRow >= 2 * Math.max(1, this.keys.length) + 1) {
         this.running = false;
         this.failed = true;
         this.onStatus('failed', 'Deepgram не принимает подключение — проверьте ключ, модель и язык');
@@ -252,7 +267,10 @@ export function mergeSameSpeaker(segs, maxGap = 3, maxChars = 1200) {
   return out;
 }
 
-const httpError = (service, status, body, model) => new Error(friendlyError(service, status, body, model));
+const httpError = apiError;
+
+/** One request with the provider's keys: on quota/money/invalid-key errors the next key is tried. */
+const withKeys = (o, fn) => settings.withKeys(o.provider, (key) => fn({ ...o, apiKey: key }), { fixedKey: o.fixedKey });
 const trimBase = (u) => String(u || '').replace(/\/+$/, '');
 
 /**
@@ -260,14 +278,16 @@ const trimBase = (u) => String(u || '').replace(/\/+$/, '');
  */
 export async function transcribeBatch(blob, o) {
   if (!o.engine) throw new Error(`${o.apiTitle} не умеет расшифровывать аудио. Выберите другой сервис в Настройки → Расшифровка файла.`);
-  if (!o.apiKey && !o.custom) throw new Error(`Нет API-ключа для ${o.apiTitle}. Добавьте его в Настройки → Ключи и провайдеры.`);
+  if (!o.apiKey && !o.custom && !settings.apiKeys(o.provider).length) throw new Error(`Нет API-ключа для ${o.apiTitle}. Добавьте его в Настройки → Ключи и провайдеры.`);
   if (!o.model) throw new Error(`Не выбрана модель расшифровки для ${o.apiTitle}.`);
   if (o.engine === 'deepgram') return deepgramBatch(blob, o);
   if (o.engine === 'chat') return chatAudioBatch(blob, o);
   return whisperBatch(blob, o);
 }
 
-async function deepgramBatch(blob, o) {
+const deepgramBatch = (blob, o) => withKeys(o, (k) => deepgramOnce(blob, k));
+
+async function deepgramOnce(blob, o) {
   const p = new URLSearchParams({
     model: o.model, language: o.language, punctuate: 'true', smart_format: 'true', utterances: 'true', utt_split: '1.2',
   });
@@ -316,7 +336,7 @@ async function whisperBatch(blob, o) {
   const all = [];
   for (let i = 0; i < parts.length; i++) {
     o.onProgress?.(i, parts.length);
-    all.push(...await whisperChunk(parts[i], o));
+    all.push(...await withKeys(o, (k) => whisperChunk(parts[i], k)));
   }
   return mergeSameSpeaker(all, 2, 900);
 }
@@ -381,7 +401,7 @@ async function chatAudioBatch(blob, o) {
   const all = [];
   for (let i = 0; i < parts.length; i++) {
     o.onProgress?.(i, parts.length);
-    all.push(...await chatAudioChunk(parts[i], o));
+    all.push(...await withKeys(o, (k) => chatAudioChunk(parts[i], k)));
   }
   return mergeSameSpeaker(all, 3, 1200);
 }

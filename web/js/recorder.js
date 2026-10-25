@@ -259,7 +259,9 @@ class Recorder extends Emitter {
     // Live transcription
     if (settings.values.transcriptionMode === 'live' && settings.hasKey('deepgram')) {
       const live = new DeepgramLive({
-        apiKey: settings.apiKey('deepgram'), model: settings.values.deepgramModel, language: settings.values.language,
+        apiKey: settings.apiKey('deepgram'), apiKeys: settings.orderedKeys('deepgram'),
+        onKeyFailed: (k) => settings.markKey('deepgram', k, 30 * 60_000, 'не принял подключение'),
+        model: settings.values.deepgramModel, language: settings.values.language,
         sampleRate: rate, diarize: settings.values.diarize, keyterms: settings.keytermList,
         endpoint: settings.route('deepgram', settings.baseURL('deepgram').replace(/^http/, 'ws') + '/listen'),
       });

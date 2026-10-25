@@ -26,6 +26,7 @@ const ui = {
   models: {},          // provider -> loaded list
   modelsLoading: null,
   keyTest: {},         // provider -> {ok, text, busy}
+  keyDrafts: {},       // provider -> [key, key, …] being edited
   storage: '',
   hideInstall: localStorage.getItem('vox.hideInstall') === '1',
 };
@@ -68,7 +69,11 @@ let scheduled = false;
 function render() {
   if (scheduled) return;
   scheduled = true;
-  requestAnimationFrame(() => { scheduled = false; doRender(); });
+  // rAF does not fire in hidden tabs; the timeout keeps the screen up to date there too.
+  let done = false;
+  const run = () => { if (done) return; done = true; scheduled = false; doRender(); };
+  requestAnimationFrame(run);
+  setTimeout(run, 120);
 }
 
 let lastRouteKey = '';
@@ -486,9 +491,11 @@ function providerRow(id) {
   const p = settings.provider(id);
   const caps = [p.llm ? 'ИИ' : '', settings.sttEngine(id) ? 'расшифровка' : ''].filter(Boolean).join(' + ');
   const ok = settings.hasKey(id);
+  const n = settings.apiKeys(id).length;
+  const paused = settings.apiKeys(id).filter(k => settings.keyStatus(id, k)).length;
   return `<a class="row nav-row sub" href="#/settings/key/${encodeURIComponent(id)}">
     <span>${esc(p.title)}<small class="muted block">${esc(caps)}${p.builtin ? '' : ' · свой'}</small></span>
-    <span>${ok ? '<span class="ok">✓</span>' : '<span class="muted">нет ключа</span>'} ›</span></a>`;
+    <span>${ok ? `<span class="${paused && paused === n ? 'warn-text' : 'ok'}">${n > 1 ? `${n - paused}/${n} ключей` : paused ? '⏸ на паузе' : '✓'}</span>` : '<span class="muted">нет ключа</span>'} ›</span></a>`;
 }
 
 const sttLabel = (id) => {
@@ -636,11 +643,56 @@ function viewAddProvider() {
     </div></section></div>`;
 }
 
+function keyDrafts(p) {
+  if (!ui.keyDrafts[p]) ui.keyDrafts[p] = settings.apiKeys(p).length ? settings.apiKeys(p) : [''];
+  return ui.keyDrafts[p];
+}
+
+const maskKey = (k) => (k.length > 10 ? `${k.slice(0, 4)}…${k.slice(-4)}` : k ? '••••' : '');
+const hhmm = (t) => new Date(t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+
+function keyBadge(p, key) {
+  if (!key) return '';
+  const st = settings.keyStatus(p, key);
+  if (st) {
+    const sameDay = new Date(st.until).toDateString() === new Date().toDateString();
+    return `<span class="key-badge paused">⏸ ${esc(st.reason)} · до ${sameDay ? '' : 'завтра '}${hhmm(st.until)}</span>`;
+  }
+  if (settings.apiKeys(p).includes(key) && settings.apiKey(p) === key) return '<span class="key-badge active">● используется сейчас</span>';
+  if (settings.apiKeys(p).includes(key)) return '<span class="key-badge">запасной</span>';
+  return '<span class="key-badge">не сохранён</span>';
+}
+
+function keysSection(p, info, custom) {
+  const list = keyDrafts(p);
+  const rows = list.map((key, i) => {
+    const t = ui.keyTest[`${p}#${i}`];
+    return `<div class="key-row">
+      <div class="row between"><b>Ключ ${i + 1}</b>${keyBadge(p, key)}</div>
+      <div class="row gap">
+        <input id="key-${esc(p)}-${i}" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"
+          placeholder="Вставьте ключ${i ? ' другого аккаунта' : ''}" value="${esc(key)}" data-keyidx="${i}" data-p="${esc(p)}">
+        <button class="icon-btn subtle" data-action="paste-key" data-p="${esc(p)}" data-i="${i}" title="Вставить">📋</button>
+        <button class="icon-btn subtle" data-action="reveal-key" data-p="${esc(p)}" data-i="${i}" title="Показать">👁</button>
+        ${list.length > 1 || key ? `<button class="icon-btn subtle" data-action="remove-key" data-p="${esc(p)}" data-i="${i}" title="Удалить">✕</button>` : ''}
+      </div>
+      ${t && !t.busy ? `<p class="test-result ${t.ok ? 'ok' : 'bad'}">${t.ok ? '✓' : '✕'} ${esc(t.text)}</p>` : ''}
+    </div>`;
+  }).join('');
+  return `<section class="group">
+      <h3>API-ключи${custom ? ' (если нужны)' : ''}</h3>
+      ${rows}
+      <button class="btn small ghost" data-action="add-key-field" data-p="${esc(p)}">＋ Ещё ключ (другой аккаунт)</button>
+      ${info.url ? `<a class="btn small ghost" href="${esc(info.url)}" target="_blank" rel="noopener">Получить ключ ↗</a>` : ''}
+      <p class="hint">Можно добавить несколько ключей с разных аккаунтов. Когда один упрётся в лимит (у Gemini — дневной или поминутный),
+        закончатся деньги или ключ не примут, Vox сам переключится на следующий, а этот поставит на паузу до сброса лимита.</p>
+      <p class="hint">${esc(info.hint || '')}</p>
+    </section>`;
+}
+
 function viewKey(p) {
   const info = settings.provider(p);
   if (!info) return viewSettings();
-  const k = `key:${p}`;
-  const val = ui.drafts[k] ?? settings.apiKey(p);
   const custom = !info.builtin;
   const cp = custom ? settings.values.customProviders.find(x => x.id === p) : null;
   const testKey = ui.keyTest[p];
@@ -659,17 +711,7 @@ function viewKey(p) {
         <option value="chat" ${cp.stt === 'chat' ? 'selected' : ''}>Модель с аудио</option></select></label>` : ''}
     </section>`;
   }
-  h += `<section class="group">
-      <label class="field col"><span>API-ключ${custom ? ' (если нужен)' : ''}</span>
-        <input id="key-${esc(p)}" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Вставьте ключ" value="${esc(val)}" data-draft="${esc(k)}">
-      </label>
-      <div class="row gap wrap">
-        <button class="btn small ghost" data-action="paste-key" data-p="${esc(p)}">📋 Вставить</button>
-        <button class="btn small ghost" data-action="reveal-key" data-p="${esc(p)}">👁 Показать</button>
-        ${info.url ? `<a class="btn small ghost" href="${esc(info.url)}" target="_blank" rel="noopener">Получить ключ ↗</a>` : ''}
-      </div>
-      <p class="hint">${esc(info.hint || '')}</p>
-    </section>`;
+  h += keysSection(p, info, custom);
   if (info.builtin && p !== 'deepgram') {
     h += `<section class="group">
       <label class="field col"><span>Адрес API</span>
@@ -690,7 +732,6 @@ function viewKey(p) {
         ${info.llm ? `<button class="btn small ${settings.values.llmProvider === p ? '' : 'ghost'}" data-action="use-llm" data-p="${esc(p)}">${settings.values.llmProvider === p ? '✓ Используется для ИИ' : 'Использовать для ИИ'}</button>` : ''}
         ${settings.sttEngine(p) ? `<button class="btn small ${settings.values.batchProvider === p ? '' : 'ghost'}" data-action="use-stt" data-p="${esc(p)}">${settings.values.batchProvider === p ? '✓ Используется для расшифровки' : 'Использовать для расшифровки'}</button>` : ''}
       </div>
-      ${settings.apiKey(p) ? `<button class="btn wide ghost danger" data-action="delete-key" data-p="${esc(p)}">Удалить ключ</button>` : ''}
       ${custom ? `<button class="btn wide ghost danger" data-action="remove-provider" data-p="${esc(p)}">Удалить провайдера</button>` : ''}
     </section></div>`;
   return h;
@@ -966,7 +1007,8 @@ const actions = {
     ui.modelsLoading = p; render();
     try {
       const cfg = settings.llmConfig(p);
-      if (ui.drafts[`key:${p}`] !== undefined) cfg.apiKey = trim(ui.drafts[`key:${p}`]);
+      const draft = (ui.keyDrafts[p] || []).map(trim).find(Boolean);
+      if (draft) cfg.fixedKey = draft;
       ui.models[p] = await listModels(cfg);
       if (!ui.models[p].length) toast('Сервер не вернул список моделей', 'error');
       else toast(`Моделей: ${ui.models[p].length}. Начните вводить название — появятся подсказки.`);
@@ -976,42 +1018,71 @@ const actions = {
   'paste-key': async (el) => {
     try {
       const t = (await navigator.clipboard.readText()).trim();
-      ui.drafts[`key:${el.dataset.p}`] = t;
+      keyDrafts(el.dataset.p)[Number(el.dataset.i) || 0] = t;
       render();
     } catch { toast('Вставьте ключ вручную (долгое нажатие → Вставить)', 'error'); }
   },
   'reveal-key': (el) => {
-    const inp = document.getElementById(`key-${el.dataset.p}`);
+    const inp = document.getElementById(`key-${el.dataset.p}-${el.dataset.i || 0}`);
     if (inp) inp.type = inp.type === 'password' ? 'text' : 'password';
+  },
+  'add-key-field': (el) => {
+    keyDrafts(el.dataset.p).push('');
+    render();
+    setTimeout(() => document.getElementById(`key-${el.dataset.p}-${keyDrafts(el.dataset.p).length - 1}`)?.focus(), 60);
+  },
+  'remove-key': (el) => {
+    const p = el.dataset.p;
+    const list = keyDrafts(p);
+    list.splice(Number(el.dataset.i), 1);
+    if (!list.length) list.push('');
+    settings.setApiKeys(p, list);
+    for (const k of Object.keys(ui.keyTest)) if (k.startsWith(p + '#')) delete ui.keyTest[k];
+    render();
   },
   'save-key': async (el) => {
     const p = el.dataset.p;
     const info = settings.provider(p);
-    if (ui.drafts[`key:${p}`] !== undefined) settings.setApiKey(p, ui.drafts[`key:${p}`]);
+    const list = keyDrafts(p).map(k => k.trim());
+    settings.setApiKeys(p, list);
+    ui.keyDrafts[p] = settings.apiKeys(p).length ? settings.apiKeys(p) : [''];
     if (ui.drafts[`base:${p}`] !== undefined) settings.setBaseURL(p, ui.drafts[`base:${p}`]);
-    delete ui.drafts[`key:${p}`];
+    for (const k of Object.keys(ui.keyTest)) if (k.startsWith(p + '#')) delete ui.keyTest[k];
     ui.keyTest[p] = { busy: true };
     render();
-    try {
-      if (p === 'deepgram') {
-        await verifyDeepgram(settings.apiKey(p), settings.deepgramBase);
-        ui.keyTest[p] = { ok: true, text: 'Ключ Deepgram работает' };
-      } else if (info.llm) {
-        const cfg = settings.llmConfig(p);
-        const r = await complete(cfg, 'Отвечай очень кратко.', [{ role: 'user', content: 'Скажи «работает» одним словом.' }]);
-        ui.keyTest[p] = { ok: true, text: `Работает. Ответ модели ${cfg.model}: ${r.trim().slice(0, 60)}` };
-        if (!settings.hasKey(settings.values.llmProvider)) settings.set('llmProvider', p);
-      } else {
-        ui.keyTest[p] = { ok: true, text: 'Сохранено' };
+    const keys = settings.apiKeys(p);
+    const targets = keys.length ? keys : (info.builtin ? [] : ['']);
+    let okCount = 0;
+    for (let i = 0; i < targets.length; i++) {
+      const key = targets[i];
+      const slot = `${p}#${i}`;
+      try {
+        if (p === 'deepgram') {
+          await verifyDeepgram(key, settings.deepgramBase);
+          ui.keyTest[slot] = { ok: true, text: 'работает' };
+        } else if (info.llm) {
+          const cfg = { ...settings.llmConfig(p), fixedKey: key };
+          const r = await complete(cfg, 'Отвечай очень кратко.', [{ role: 'user', content: 'Скажи «работает» одним словом.' }]);
+          ui.keyTest[slot] = { ok: true, text: `работает (${cfg.model}: ${r.trim().slice(0, 40)})` };
+        } else {
+          ui.keyTest[slot] = { ok: true, text: 'сохранён' };
+        }
+        settings.clearKey(p, key);
+        okCount++;
+      } catch (e) {
+        ui.keyTest[slot] = { ok: false, text: e.message || String(e) };
       }
-    } catch (e) {
-      ui.keyTest[p] = { ok: false, text: e.message || String(e) };
+      render();
     }
+    ui.keyTest[p] = targets.length
+      ? { ok: okCount > 0, text: okCount === targets.length ? (targets.length > 1 ? `Все ключи работают (${okCount})` : 'Ключ работает') : `Работают ${okCount} из ${targets.length}` }
+      : { ok: false, text: 'Добавьте хотя бы один ключ' };
+    if (okCount && info.llm && !settings.hasKey(settings.values.llmProvider)) settings.set('llmProvider', p);
     render();
   },
   'test-stt': async (el) => {
     const p = el.dataset.p;
-    if (ui.drafts[`key:${p}`] !== undefined) { settings.setApiKey(p, ui.drafts[`key:${p}`]); delete ui.drafts[`key:${p}`]; }
+    if (ui.keyDrafts[p]) settings.setApiKeys(p, ui.keyDrafts[p]);
     const k = 'stt:' + p;
     ui.keyTest[k] = { busy: true };
     render();
@@ -1042,7 +1113,6 @@ const actions = {
   'copy-proxy': async () => {
     try { await navigator.clipboard.writeText(proxyCode); toast('Код скопирован'); } catch { toast('Выделите код и скопируйте вручную', 'error'); }
   },
-  'delete-key': (el) => { settings.setApiKey(el.dataset.p, ''); delete ui.drafts[`key:${el.dataset.p}`]; ui.keyTest[el.dataset.p] = null; render(); },
   'omi-pair': async () => {
     try { await omi.pair(); toast('Omi подключён'); } catch (e) { if (e.name !== 'NotFoundError') toast(e.message, 'error'); }
     render();
@@ -1117,6 +1187,7 @@ document.addEventListener('click', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target;
   if (el.dataset.draft !== undefined) ui.drafts[el.dataset.draft] = el.value;
+  if (el.dataset.keyidx !== undefined) keyDrafts(el.dataset.p)[Number(el.dataset.keyidx)] = el.value;
   if (el.dataset.live) { ui[el.dataset.live] = el.value; render(); }
   if (el.tagName === 'TEXTAREA' && el.closest('.composer')) {
     el.style.height = 'auto';
@@ -1178,7 +1249,7 @@ recorder.on('interim', onText);
 store.on('change', () => {
   // Avoid re-rendering under the user's fingers while typing in settings fields.
   const a = document.activeElement;
-  if (a && $view.contains(a) && (a.dataset.setting || a.dataset.model || a.dataset.setin || a.dataset.custom) && route()[0] === 'settings') return;
+  if (a && $view.contains(a) && (a.dataset.setting || a.dataset.model || a.dataset.setin || a.dataset.custom || a.dataset.keyidx !== undefined) && route()[0] === 'settings') return;
   render();
 });
 settings.on('change', (k) => {
@@ -1187,7 +1258,7 @@ settings.on('change', (k) => {
   render();
 });
 omi.on('change', render);
-window.addEventListener('hashchange', () => { closeModal(); render(); });
+window.addEventListener('hashchange', () => { closeModal(); if (route()[1] !== 'key') ui.keyDrafts = {}; render(); });
 window.addEventListener('beforeunload', (e) => {
   if (recorder.isRecording) { e.preventDefault(); e.returnValue = ''; }
 });
