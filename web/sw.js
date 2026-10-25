@@ -24,8 +24,11 @@ self.addEventListener('fetch', (e) => {
   const cdn = url.hostname === 'cdn.jsdelivr.net';
   if (!sameOrigin && !cdn) return;
   // Network first (fresh code after updates), cache fallback (offline).
+  // `no-cache` revalidates with the server, so a new version is picked up right away
+  // (GitHub Pages otherwise lets the browser reuse files for 10 minutes).
+  const fresh = sameOrigin ? fetch(url.href, { cache: 'no-cache', credentials: 'same-origin' }) : fetch(e.request);
   e.respondWith(
-    fetch(e.request)
+    fresh
       .then(res => {
         if (res.ok) {
           const copy = res.clone();
