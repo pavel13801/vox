@@ -16,6 +16,9 @@ enum APIErrors {
         if has("location is not supported|unsupported_country|country, region, or territory|not available in your (country|region)|request not allowed") {
             return "\(title): сервис недоступен из вашей страны (запросы из России блокируются). Включите VPN на телефоне или настройте прокси: Настройки → Прокси. Ещё вариант — OpenRouter или DeepSeek, они работают из России."
         }
+        if [500, 502, 503, 504, 529].contains(status) || has("overloaded|\"unavailable\"|status.{0,4}unavailable|try again later") {
+            return "\(title): сервер перегружен или временно недоступен (\(status)). Это на стороне сервиса, а не ваших ключей: Vox повторил запрос несколько раз и пробовал запасную модель. Попробуйте чуть позже или выберите другую модель. \(d)"
+        }
         if has("resource_exhausted|quota|rate.?limit|too many requests") || status == 429 {
             return "\(title): превышен лимит запросов или квота. \(d)"
         }
@@ -36,9 +39,57 @@ enum APIErrors {
         return APIError(status: status, body: body, message: message(title, status, body, model: model))
     }
 
+    /// Network failure (no internet, timeout, blocked address). Status -1 marks it as temporary for retries.
     static func network(_ title: String, _ error: Error) -> Error {
         if (error as? URLError)?.code == .cancelled || error is CancellationError { return error }
-        return VoxError.message("Не удалось связаться с \(title): нет интернета или адрес заблокирован. Попробуйте VPN или прокси (Настройки → Прокси). (\(error.localizedDescription))")
+        return APIError(status: -1, body: "network",
+                        message: "Не удалось связаться с \(title): нет интернета или адрес заблокирован. Попробуйте VPN или прокси (Настройки → Прокси). (\(error.localizedDescription))")
+    }
+}
+
+/// Retries for temporary failures: overloaded servers (HTTP 503 "The model is overloaded"), 5xx, network drops.
+enum Retry {
+    static func isTransient(_ error: Error) -> Bool {
+        guard let e = error as? APIError, !e.noRotate else { return false }
+        if e.status == -1 || [500, 502, 503, 504, 529].contains(e.status) { return true }
+        return e.body.range(of: "overloaded|\"UNAVAILABLE\"|try again later", options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// Runs `body` up to `attempts` times, waiting 2 s, 5 s, 12 s… between temporary failures.
+    static func run<T>(attempts: Int = 4, _ body: () async throws -> T) async throws -> T {
+        var delay: Double = 2
+        var lastError: Error = VoxError.message("Не удалось выполнить запрос")
+        for attempt in 0..<max(1, attempts) {
+            do {
+                return try await body()
+            } catch {
+                lastError = error
+                guard isTransient(error), attempt < attempts - 1, !Task.isCancelled else { throw error }
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                delay *= 2.5
+            }
+        }
+        throw lastError
+    }
+
+    /// Tries the chosen model, then the provider's fallback models while the error is "server overloaded".
+    static func withFallbackModels<T>(_ providerID: String, model: String, _ body: (String) async throws -> T) async throws -> T {
+        do {
+            return try await body(model)
+        } catch {
+            guard isTransient(error) else { throw error }
+            var lastError = error
+            let fallbacks = (AppSettings.shared.provider(providerID)?.fallbackModels ?? []).filter { $0 != model }
+            for m in fallbacks {
+                do {
+                    return try await body(m)
+                } catch {
+                    guard isTransient(error) else { throw error }
+                    lastError = error
+                }
+            }
+            throw lastError
+        }
     }
 }
 
@@ -70,11 +121,15 @@ enum LLMClient {
         }
     }
 
-    private static func withKeys<T>(_ config: LLMConfig, _ body: (LLMConfig) async throws -> T) async throws -> T {
-        try await settings.withKeys(config.providerID, fixedKey: config.fixedKey) { key in
-            var c = config
-            c.apiKey = key
-            return try await body(c)
+    /// model fallback (on overload) → key rotation (on limits) → retries with pauses (on temporary errors).
+    private static func withKeys<T>(_ config: LLMConfig, retries: Int = 4, _ body: (LLMConfig) async throws -> T) async throws -> T {
+        try await Retry.withFallbackModels(config.providerID, model: config.model) { model in
+            try await settings.withKeys(config.providerID, fixedKey: config.fixedKey) { key in
+                var c = config
+                c.apiKey = key
+                c.model = model
+                return try await Retry.run(attempts: retries) { try await body(c) }
+            }
         }
     }
 

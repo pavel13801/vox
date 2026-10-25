@@ -1,6 +1,6 @@
 // Speech-to-text: Deepgram live (WebSocket) and batch (Deepgram / Whisper-compatible / audio-capable chat models).
 import { uuid, wavFromPCM16, extForMime } from './util.js';
-import { apiError, request, extractJSONObject } from './llm.js';
+import { apiError, request, extractJSONObject, retryRun, withFallbackModels } from './llm.js';
 import { settings } from './settings.js';
 
 // ---------------------------------------------------------------- live
@@ -270,7 +270,7 @@ export function mergeSameSpeaker(segs, maxGap = 3, maxChars = 1200) {
 const httpError = apiError;
 
 /** One request with the provider's keys: on quota/money/invalid-key errors the next key is tried. */
-const withKeys = (o, fn) => settings.withKeys(o.provider, (key) => fn({ ...o, apiKey: key }), { fixedKey: o.fixedKey });
+const withKeys = (o, fn) => settings.withKeys(o.provider, (key) => retryRun(() => fn({ ...o, apiKey: key })), { fixedKey: o.fixedKey });
 const trimBase = (u) => String(u || '').replace(/\/+$/, '');
 
 /**
@@ -401,7 +401,8 @@ async function chatAudioBatch(blob, o) {
   const all = [];
   for (let i = 0; i < parts.length; i++) {
     o.onProgress?.(i, parts.length);
-    all.push(...await withKeys(o, (k) => chatAudioChunk(parts[i], k)));
+    // Overloaded model (503) → retries → fallback models (e.g. gemini-flash-latest, flash-lite).
+    all.push(...await withFallbackModels(o.provider, o.model, (model) => withKeys({ ...o, model }, (k) => chatAudioChunk(parts[i], k))));
   }
   return mergeSameSpeaker(all, 3, 1200);
 }

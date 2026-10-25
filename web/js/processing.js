@@ -4,6 +4,21 @@ import { settings } from './settings.js';
 import { transcribeBatch } from './stt.js';
 import { summarize } from './ai.js';
 import { uuid, wavFromPCM16 } from './util.js';
+import { isTransient } from './llm.js';
+
+const autoRetries = new Map();
+/** For temporary failures (server overloaded, network) the conversation is retried automatically later. */
+function autoRetryNote(id, e) {
+  if (!isTransient(e)) return '';
+  const n = autoRetries.get(id) || 0;
+  const delays = [120, 300, 900];
+  if (n >= delays.length) return '';
+  autoRetries.set(id, n + 1);
+  setTimeout(() => {
+    if (store.conversation(id)?.status === 'failed') processing.retry(id);
+  }, delays[n] * 1000);
+  return `\n\nПовторю автоматически через ${delays[n] / 60} мин.`;
+}
 
 export const processing = {
   queue: [],
@@ -118,7 +133,8 @@ export const processing = {
             if (last && x.duration < last.end) x.duration = last.end;
           });
         } catch (e) {
-          store.update(id, x => { x.status = 'failed'; x.errorMessage = e.message; });
+          const note = autoRetryNote(id, e);
+          store.update(id, x => { x.status = 'failed'; x.errorMessage = e.message + note; });
           return;
         }
       }
@@ -160,7 +176,8 @@ export const processing = {
         x.errorMessage = null;
       });
     } catch (e) {
-      store.update(id, x => { x.status = 'failed'; x.errorMessage = e.message; });
+      const note = autoRetryNote(id, e);
+      store.update(id, x => { x.status = 'failed'; x.errorMessage = e.message + note; });
     }
   },
 };

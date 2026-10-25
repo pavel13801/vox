@@ -327,3 +327,4 @@ pre.code { background: var(--card); border-radius: 12px; padding: 12px; font-siz
 .key-badge.paused { color: var(--orange); background: rgba(245, 158, 11, 0.14); }
 .warn-text { color: var(--orange); }
 .key-row b { white-space: nowrap; margin-right: 8px; }
+.card.warn p { white-space: pre-line; }

@@ -24,6 +24,9 @@ export function friendlyError(title, status, body, model = '') {
   if (status === 404 || /not found|does not exist|no such model|unknown model|model_not_found/i.test(d)) {
     return `${title}: модель «${model}» не найдена. Нажмите ⟳ рядом с моделью, чтобы загрузить список доступных. (${status}) ${d}`;
   }
+  if ([500, 502, 503, 504, 529].includes(status) || /overloaded|"unavailable"|try again later/i.test(all)) {
+    return `${title}: сервер перегружен или временно недоступен (${status}). Это на стороне сервиса, а не ваших ключей: Vox повторил запрос несколько раз и пробовал запасную модель. Попробуйте чуть позже или выберите другую модель. ${d}`;
+  }
   if (status === 429 || /quota|rate limit|resource_exhausted/i.test(all)) return `${title}: превышен лимит запросов или квота. Подождите и повторите. ${d}`;
   if (status === 402 || /insufficient|balance|credit/i.test(all)) return `${title}: недостаточно средств на счёте. ${d}`;
   if (status === 403) return `${title}: нет доступа (403). Возможно, ключ без нужных прав или страна заблокирована. ${d}`;
@@ -37,7 +40,8 @@ export async function request(url, init, title) {
     return await fetch(url, init);
   } catch (e) {
     if (e.name === 'AbortError') throw e;
-    throw new Error(`Не удалось связаться с ${title}: нет интернета, адрес заблокирован или сервис не принимает запросы из браузера (CORS). Попробуйте VPN или прокси (Настройки → Прокси).`);
+    // status -1 marks a temporary network failure for retries
+    throw new HTTPError(-1, `Не удалось связаться с ${title}: нет интернета, адрес заблокирован или сервис не принимает запросы из браузера (CORS). Попробуйте VPN или прокси (Настройки → Прокси).`, 'network');
   }
 }
 
@@ -99,7 +103,45 @@ async function completeOnce(cfg, system, messages, json, signal) {
 }
 
 /** Runs a request with the provider's keys, switching to the next key when one runs out (see settings.withKeys). */
-const withKeys = (cfg, fn) => settings.withKeys(cfg.provider, (key) => fn({ ...cfg, apiKey: key }), { fixedKey: cfg.fixedKey });
+// ---- temporary failures: overloaded server (503 "The model is overloaded"), 5xx, network drops
+
+export function isTransient(e) {
+  if (!e || e.noRotate || e.name === 'AbortError') return false;
+  if (e.status === -1 || [500, 502, 503, 504, 529].includes(e.status)) return true;
+  return /overloaded|"UNAVAILABLE"|try again later/i.test(e.body || '');
+}
+
+/** Runs fn up to `attempts` times, waiting 2 s, 5 s, 12 s… between temporary failures. */
+export async function retryRun(fn, attempts = 4) {
+  let delay = 2000;
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!isTransient(e) || i >= attempts - 1) throw e;
+      await new Promise(r => setTimeout(r, delay));
+      delay *= 2.5;
+    }
+  }
+}
+
+/** Tries the chosen model, then the provider's fallback models while the server is overloaded. */
+export async function withFallbackModels(providerId, model, fn) {
+  try {
+    return await fn(model);
+  } catch (e) {
+    if (!isTransient(e)) throw e;
+    let last = e;
+    for (const m of (settings.provider(providerId)?.fallbackModels || []).filter(x => x !== model)) {
+      try { return await fn(m); } catch (err) { if (!isTransient(err)) throw err; last = err; }
+    }
+    throw last;
+  }
+}
+
+/** model fallback (overload) → key rotation (limits) → retries with pauses (temporary errors). */
+const withKeys = (cfg, fn) => withFallbackModels(cfg.provider, cfg.model, (model) =>
+  settings.withKeys(cfg.provider, (key) => retryRun(() => fn({ ...cfg, apiKey: key, model })), { fixedKey: cfg.fixedKey }));
 
 export async function complete(cfg, system, messages, { json = false, signal } = {}) {
   return withKeys(cfg, async (c) => {

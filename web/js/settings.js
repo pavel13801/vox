@@ -21,6 +21,8 @@ export const BUILTIN = {
     sttModel: 'gemini-3.8-flash', sttModels: ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-pro-latest'],
     hint: 'aistudio.google.com → Get API key. Ключ начинается с «AIza». Google не обслуживает Россию — нужен VPN или прокси.',
     url: 'https://aistudio.google.com/apikey',
+    // Tried when the chosen model is overloaded (HTTP 503).
+    fallbackModels: ['gemini-flash-latest', 'gemini-flash-lite-latest'],
   },
   openai: {
     title: 'OpenAI', kind: 'openai', base: 'https://api.openai.com/v1', llm: true, stt: 'whisper', blocked: true,

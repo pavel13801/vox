@@ -31,7 +31,9 @@ enum BatchTranscriber {
         if o.model.trimmed.isEmpty { throw VoxError.message("Не выбрана модель расшифровки для \(o.title).") }
         switch engine {
         case .deepgram:
-            return try await settings.withKeys(o.providerID, fixedKey: o.fixedKey) { key in try await deepgram(file: file, o, key: key) }
+            return try await settings.withKeys(o.providerID, fixedKey: o.fixedKey) { key in
+                try await Retry.run(attempts: 3) { try await deepgram(file: file, o, key: key) }
+            }
         case .whisper:
             return try await whisper(file: file, o)
         case .chat:
@@ -180,7 +182,7 @@ enum BatchTranscriber {
         for (i, part) in parts.enumerated() {
             o.onProgress?(i, parts.count)
             let segs = try await settings.withKeys(o.providerID, fixedKey: o.fixedKey) { key in
-                try await whisperChunk(part.url, offset: part.offset, o, key: key)
+                try await Retry.run { try await whisperChunk(part.url, offset: part.offset, o, key: key) }
             }
             all.append(contentsOf: segs)
         }
@@ -253,8 +255,13 @@ enum BatchTranscriber {
             o.onProgress?(i, parts.count)
             let audio = try Data(contentsOf: part.url).base64EncodedString()
             let duration = wavDuration(part.url)
-            let segs = try await settings.withKeys(o.providerID, fixedKey: o.fixedKey) { key in
-                try await chatAudioChunk(audio, offset: part.offset, duration: duration, o, key: key)
+            // Overloaded model (503) → retries → fallback models (e.g. gemini-flash-latest, flash-lite).
+            let segs: [TranscriptSegment] = try await Retry.withFallbackModels(o.providerID, model: o.model) { model -> [TranscriptSegment] in
+                var opts = o
+                opts.model = model
+                return try await settings.withKeys(o.providerID, fixedKey: o.fixedKey) { key in
+                    try await Retry.run { try await chatAudioChunk(audio, offset: part.offset, duration: duration, opts, key: key) }
+                }
             }
             all.append(contentsOf: segs)
         }

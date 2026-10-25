@@ -42,6 +42,8 @@ struct ProviderInfo: Identifiable {
     /// The provider blocks some countries (Russia): routed through the proxy by default when one is set.
     var blocked: Bool
     var builtin: Bool
+    /// Models tried when the chosen one is overloaded (HTTP 503) — e.g. Gemini 3.8 Flash → Flash (latest) → Flash-Lite.
+    var fallbackModels: [String] = []
 }
 
 /// A provider the user added (any OpenAI- or Anthropic-compatible service).
@@ -77,7 +79,8 @@ enum Providers {
                      model: "gemini-3.8-flash", models: ["gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-pro-latest"],
                      sttModel: "gemini-3.8-flash", sttModels: ["gemini-3.8-flash", "gemini-flash-latest", "gemini-pro-latest"],
                      hint: "aistudio.google.com → Get API key. Ключ начинается с «AIza». Google не обслуживает Россию — нужен VPN или прокси.",
-                     keyURL: "https://aistudio.google.com/apikey", blocked: true, builtin: true),
+                     keyURL: "https://aistudio.google.com/apikey", blocked: true, builtin: true,
+                     fallbackModels: ["gemini-flash-latest", "gemini-flash-lite-latest"]),
         ProviderInfo(id: "openai", title: "OpenAI", kind: .openai, base: "https://api.openai.com/v1", llm: true, stt: .whisper,
                      model: "gpt-5-mini", models: ["gpt-5-mini", "gpt-5", "gpt-5-nano", "gpt-4.1-mini", "gpt-4o-mini"],
                      sttModel: "whisper-1", sttModels: ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],

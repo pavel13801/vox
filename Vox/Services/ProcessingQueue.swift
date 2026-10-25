@@ -14,6 +14,23 @@ final class ProcessingQueue: ObservableObject {
     @Published var progress: [UUID: String] = [:]
     private var queue: [UUID] = []
     private var running = false
+    private var autoRetries: [UUID: Int] = [:]
+
+    /// For temporary failures (server overloaded, network) the conversation is retried automatically later.
+    private func autoRetryNote(_ id: UUID, _ error: Error) -> String {
+        guard Retry.isTransient(error) else { return "" }
+        let n = autoRetries[id, default: 0]
+        let delays = [120, 300, 900]
+        guard n < delays.count else { return "" }
+        autoRetries[id] = n + 1
+        let delay = delays[n]
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+            guard let c = AppStore.shared.conversation(id), c.status == .failed else { return }
+            ProcessingQueue.shared.retry(id)
+        }
+        return "\n\nПовторю автоматически через \(delay / 60) мин."
+    }
 
     func enqueue(_ id: UUID) {
         if activeID == id || queue.contains(id) { return }
@@ -166,9 +183,10 @@ final class ProcessingQueue: ObservableObject {
                 }
             } catch {
                 progress[id] = nil
+                let note = autoRetryNote(id, error)
                 store.update(id) { c in
                     c.status = .failed
-                    c.errorMessage = error.localizedDescription
+                    c.errorMessage = error.localizedDescription + note
                 }
                 return
             }
@@ -242,9 +260,10 @@ final class ProcessingQueue: ObservableObject {
                 c.errorMessage = nil
             }
         } catch {
+            let note = autoRetryNote(id, error)
             store.update(id) { c in
                 c.status = .failed
-                c.errorMessage = error.localizedDescription
+                c.errorMessage = error.localizedDescription + note
             }
         }
     }
