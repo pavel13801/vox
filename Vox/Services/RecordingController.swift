@@ -114,8 +114,13 @@ final class RecordingController: ObservableObject {
                 return
             }
         }
-        if settings.transcriptionMode == .live && !settings.hasKey(.deepgram) {
-            lastError = "Ключ Deepgram не задан — запись сохранится, расшифровка будет после добавления ключа."
+        if settings.transcriptionMode == .live && !settings.hasKey("deepgram") {
+            let bp = settings.batchProvider
+            if bp != "deepgram" && settings.hasKey(bp) && settings.sttEngine(bp) != nil {
+                lastError = "Live-текст работает только с Deepgram. Запись расшифруется после остановки через \(settings.title(bp))."
+            } else {
+                lastError = "Ключ Deepgram не задан — запись сохранится, расшифруйте её позже (Настройки → Расшифровка файла)."
+            }
         }
 
         self.source = source
@@ -195,14 +200,21 @@ final class RecordingController: ObservableObject {
         store.insert(c)
 
         var liveOptions: DeepgramLiveClient.Options?
-        if settings.transcriptionMode == .live && settings.hasKey(.deepgram) {
+        if settings.transcriptionMode == .live && settings.hasKey("deepgram") {
+            let wsBase = settings.baseURL("deepgram")
+                .replacingOccurrences(of: "https://", with: "wss://")
+                .replacingOccurrences(of: "http://", with: "ws://")
+            let appSettings = settings
             liveOptions = DeepgramLiveClient.Options(
-                apiKey: settings.apiKey(.deepgram),
+                apiKey: settings.apiKey("deepgram"),
                 model: settings.deepgramModel,
                 language: settings.language,
                 sampleRate: rate,
                 diarize: settings.diarize,
-                keyterms: settings.keytermList)
+                keyterms: settings.keytermList,
+                apiKeys: settings.orderedKeys("deepgram"),
+                endpoint: settings.route("deepgram", wsBase + "/listen"),
+                onKeyFailed: { key, reason in appSettings.pauseKey("deepgram", key, seconds: 1800, reason: reason) })
         }
         let pipeline = AudioPipeline(conversationID: c.id, sampleRate: rate, pcmURL: store.rawPCMURL(for: c.id),
                                      live: liveOptions, vadThreshold: settings.vadThreshold)

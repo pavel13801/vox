@@ -10,6 +10,8 @@ struct SettingsView: View {
     @State private var exportError: String?
     @State private var confirmDeleteAll = false
     @State private var storageText = "…"
+    @State private var sttTest: TestResult?
+    @State private var sttTesting = false
 
     var body: some View {
         NavigationStack {
@@ -20,21 +22,55 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    NavigationLink {
-                        KeysView()
-                    } label: {
-                        HStack {
-                            Label("Ключи API", systemImage: "key.fill")
-                            Spacer()
-                            Text(keysSummary).font(.caption).foregroundStyle(.secondary)
+                    ForEach(settings.providerIDs, id: \.self) { id in
+                        NavigationLink {
+                            ProviderDetailView(id: id)
+                        } label: {
+                            ProviderRow(id: id)
                         }
                     }
+                    NavigationLink {
+                        AddProviderView()
+                    } label: {
+                        Label("Добавить любой другой ИИ", systemImage: "plus.circle")
+                    }
+                } header: {
+                    Text("Ключи и провайдеры")
                 } footer: {
-                    Text("Ключи хранятся только на этом iPhone (в Keychain). Запросы идут напрямую к провайдерам — без посредников и лимитов.")
+                    Text("Ключи хранятся только на этом iPhone (в Keychain) и отправляются напрямую провайдерам. У каждого можно сохранить несколько ключей — если один упрётся в лимит, Vox сам переключится на следующий.")
                 }
 
                 Section {
-                    Picker("Расшифровка", selection: $settings.transcriptionMode) {
+                    Picker("Провайдер", selection: $settings.llmProvider) {
+                        ForEach(settings.llmProviderIDs, id: \.self) { id in
+                            Text(settings.title(id) + (settings.hasKey(id) ? "" : " — нет ключа")).tag(id)
+                        }
+                    }
+                    ModelField(provider: settings.llmProvider)
+                    Toggle("Автоматическая сводка", isOn: $settings.autoSummarize)
+                    Picker("Язык сводки", selection: $settings.summaryLanguage) {
+                        ForEach(SummaryLanguage.allCases) { Text($0.title).tag($0) }
+                    }
+                    Picker("Шаблон по умолчанию", selection: $settings.defaultTemplate) {
+                        ForEach(SummaryTemplate.all) { Text($0.title).tag($0.id) }
+                    }
+                    Toggle("Извлекать задачи", isOn: $settings.extractTasks)
+                    Toggle("Запоминать факты обо мне", isOn: $settings.extractMemories)
+                    Picker("Объём контекста", selection: $settings.maxContextChars) {
+                        Text("Малый (~100 тыс. символов)").tag(100_000)
+                        Text("Средний (~300 тыс.)").tag(300_000)
+                        Text("Большой (~800 тыс.)").tag(800_000)
+                        Text("Огромный (~2 млн, Gemini)").tag(2_000_000)
+                    }
+                    NavigationLink("Свои инструкции для ИИ") { InstructionsView() }
+                } header: {
+                    Text("ИИ-анализ и чат")
+                } footer: {
+                    Text("Сводка, задачи, память и чат. Бесплатно: Google Gemini (ключ в AI Studio) или Groq. Длинные записи обрабатываются по частям.")
+                }
+
+                Section {
+                    Picker("Режим", selection: $settings.transcriptionMode) {
                         ForEach(TranscriptionMode.allCases) { Text($0.title).tag($0) }
                     }
                     Picker("Язык", selection: $settings.language) {
@@ -57,67 +93,45 @@ struct SettingsView: View {
                 } header: {
                     Text("Распознавание речи")
                 } footer: {
-                    Text("Live — текст появляется во время записи (Deepgram ≈ $0.46/час). «После записи» — файл расшифровывается целиком, дешевле (≈ $0.26/час) и точнее со спикерами. При $200 бесплатного кредита Deepgram это сотни часов.")
+                    Text("Live-текст во время записи умеет только Deepgram. В режиме «После записи» файл расшифровывает сервис ниже — любой, в том числе Gemini.")
                 }
 
                 Section {
                     Picker("Сервис", selection: $settings.batchProvider) {
-                        ForEach(BatchSTTProvider.allCases) { Text($0.title).tag($0) }
+                        ForEach(settings.sttProviderIDs, id: \.self) { id in
+                            Text(sttLabel(id)).tag(id)
+                        }
                     }
-                    if settings.batchProvider != .deepgram {
-                        TextField("Модель (\(settings.batchProvider.defaultModel))", text: $settings.batchModel)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
+                    if settings.batchProvider != "deepgram" {
+                        STTOptions(provider: settings.batchProvider)
+                        Button {
+                            testSTT()
+                        } label: {
+                            HStack {
+                                Label("Проверить расшифровку", systemImage: "waveform.badge.magnifyingglass")
+                                if sttTesting { Spacer(); ProgressView() }
+                            }
+                        }
+                        .disabled(sttTesting)
+                        if let r = sttTest { TestResultView(result: r) }
                     }
                     Toggle("Всегда перерасшифровывать после записи", isOn: $settings.alwaysRetranscribe)
                 } header: {
                     Text("Расшифровка файла")
                 } footer: {
-                    Text("Используется для режима «После записи», импорта, кнопки «Расшифровать заново» и автоматически — если во время live-записи пропадала связь. Groq Whisper бесплатен (до ~8 ч в день), но не различает спикеров.")
+                    Text("Для режима «После записи», импорта, «Расшифровать заново» и автоматически — если во время live-записи пропадала связь. Gemini и другие ИИ-модели различают спикеров, но время реплик приблизительное. Groq Whisper бесплатен, но без спикеров.")
                 }
 
                 Section {
-                    Picker("Провайдер", selection: $settings.llmProvider) {
-                        ForEach(APIProvider.llmProviders) { p in
-                            HStack {
-                                Text(p.title)
-                                if !settings.hasKey(p) { Text("— нет ключа") }
-                            }
-                            .tag(p)
-                        }
-                    }
-                    ModelField(provider: settings.llmProvider)
-                    Toggle("Автоматическая сводка", isOn: $settings.autoSummarize)
-                    Picker("Язык сводки", selection: $settings.summaryLanguage) {
-                        ForEach(SummaryLanguage.allCases) { Text($0.title).tag($0) }
-                    }
-                    Picker("Шаблон по умолчанию", selection: $settings.defaultTemplate) {
-                        ForEach(SummaryTemplate.all) { Text($0.title).tag($0.id) }
-                    }
-                    Toggle("Извлекать задачи", isOn: $settings.extractTasks)
-                    Toggle("Запоминать факты обо мне", isOn: $settings.extractMemories)
-                    Picker("Объём контекста", selection: $settings.maxContextChars) {
-                        Text("Малый (~100 тыс. символов)").tag(100_000)
-                        Text("Средний (~300 тыс.)").tag(300_000)
-                        Text("Большой (~800 тыс.)").tag(800_000)
-                        Text("Огромный (~2 млн, Gemini)").tag(2_000_000)
-                    }
-                    NavigationLink("Свои инструкции для ИИ") {
-                        Form {
-                            Section {
-                                TextField("Например: пиши кратко, выделяй сроки и суммы; меня интересуют решения по проекту X…",
-                                          text: $settings.customInstructions, axis: .vertical)
-                                    .lineLimit(5...20)
-                            } footer: {
-                                Text("Добавляется к каждому запросу на сводку.")
-                            }
-                        }
-                        .navigationTitle("Инструкции")
-                    }
+                    TextField("https://vox-proxy.имя.workers.dev", text: $settings.proxyURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    NavigationLink("Как сделать свой прокси (3 минуты)") { ProxyHelpView() }
                 } header: {
-                    Text("ИИ-анализ и чат")
+                    Text("Прокси (обход блокировок)")
                 } footer: {
-                    Text("Сводка, задачи, память и чат. Бесплатно: Google Gemini (ключ в AI Studio) или Groq. Длинные записи, не влезающие в контекст, обрабатываются по частям.")
+                    Text(proxyFooter)
                 }
 
                 Section {
@@ -190,7 +204,7 @@ struct SettingsView: View {
                 }
 
                 Section("Справка") {
-                    NavigationLink("Установка и продление приложения") { HelpView() }
+                    NavigationLink("Установка, ключи и ошибки") { HelpView() }
                     HStack {
                         Text("Версия")
                         Spacer()
@@ -211,13 +225,43 @@ struct SettingsView: View {
                     refreshStorage()
                 }
             }
+            .onChange(of: settings.batchProvider) { _, _ in sttTest = nil }
         }
     }
 
-    private var keysSummary: String {
-        _ = settings.keysRevision
-        let n = APIProvider.allCases.filter { $0 != .custom && settings.hasKey($0) }.count
-        return n == 0 ? "не заданы" : "задано: \(n)"
+    private func sttLabel(_ id: String) -> String {
+        let how: String
+        switch settings.sttEngine(id) {
+        case .deepgram?: how = "со спикерами"
+        case .chat?: how = "ИИ-модель"
+        case .whisper?: how = "Whisper"
+        case nil: how = "—"
+        }
+        return "\(settings.title(id)) (\(how))" + (settings.hasKey(id) ? "" : " — нет ключа")
+    }
+
+    private var proxyFooter: String {
+        var s = "Gemini, OpenAI и Claude не работают из России (ошибка «location is not supported»). Решения: VPN на телефоне, OpenRouter/DeepSeek или свой бесплатный прокси на Cloudflare."
+        if !settings.proxyURL.trimmed.isEmpty {
+            let through = settings.providerIDs.filter { settings.usesProxy($0) }.map { settings.title($0) }
+            s += through.isEmpty ? " Через прокси сейчас ничего не идёт — включите в карточке провайдера." : " Через прокси идут: \(through.joined(separator: ", "))."
+        }
+        return s
+    }
+
+    private func testSTT() {
+        sttTesting = true
+        sttTest = nil
+        let options = settings.batchOptions()
+        Task {
+            do {
+                try await BatchTranscriber.verify(options: options)
+                sttTest = TestResult(ok: true, text: "Расшифровка через \(options.title) (\(options.model)) работает")
+            } catch {
+                sttTest = TestResult(ok: false, text: error.localizedDescription)
+            }
+            sttTesting = false
+        }
     }
 
     private var deviceSummary: String {
@@ -245,10 +289,66 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Model field
+// MARK: - Small pieces
+
+struct TestResult: Equatable {
+    var ok: Bool
+    var text: String
+}
+
+struct TestResultView: View {
+    let result: TestResult
+
+    var body: some View {
+        Label(result.text, systemImage: result.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+            .foregroundStyle(result.ok ? Color.green : Color.red)
+            .font(.footnote)
+            .textSelection(.enabled)
+    }
+}
+
+struct ProviderRow: View {
+    let id: String
+    @EnvironmentObject private var settings: AppSettings
+
+    var body: some View {
+        let info = settings.provider(id)
+        let keys = settings.apiKeys(id)
+        let paused = keys.filter { settings.keyPause(id, $0) != nil }.count
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(info?.title ?? id)
+                Text(caps(info)).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if !settings.hasKey(id) {
+                Text("нет ключа").font(.caption).foregroundStyle(.secondary)
+            } else if keys.count > 1 {
+                Text("\(keys.count - paused)/\(keys.count) ключей").font(.caption)
+                    .foregroundStyle(paused == keys.count ? Color.orange : Color.green)
+            } else if paused > 0 {
+                Text("⏸ на паузе").font(.caption).foregroundStyle(.orange)
+            } else {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            }
+        }
+    }
+
+    private func caps(_ info: ProviderInfo?) -> String {
+        guard let info = info else { return "" }
+        var parts: [String] = []
+        if info.llm { parts.append("ИИ") }
+        if settings.sttEngine(id) != nil { parts.append("расшифровка") }
+        if !info.builtin { parts.append("свой") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - Model fields
 
 struct ModelField: View {
-    let provider: APIProvider
+    let provider: String
+    var label = "Модель"
     @EnvironmentObject private var settings: AppSettings
     @State private var text = ""
     @State private var loaded: [String] = []
@@ -258,17 +358,20 @@ struct ModelField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Модель")
-                TextField(provider.defaultModel, text: $text)
+                Text(label)
+                TextField(settings.provider(provider)?.model ?? "модель", text: $text)
                     .multilineTextAlignment(.trailing)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .onSubmit(save)
                     .onChange(of: text) { _, _ in save() }
                 Menu {
-                    Section("Рекомендуемые") {
-                        ForEach(provider.suggestedModels, id: \.self) { m in
-                            Button(m) { text = m; save() }
+                    let suggested = settings.provider(provider)?.models ?? []
+                    if !suggested.isEmpty {
+                        Section("Рекомендуемые") {
+                            ForEach(suggested, id: \.self) { m in
+                                Button(m) { text = m; save() }
+                            }
                         }
                     }
                     if !loaded.isEmpty {
@@ -298,13 +401,14 @@ struct ModelField: View {
     }
 
     private func save() {
-        settings.setModel(text, for: provider)
+        if text.trimmed != settings.model(provider) { settings.setModel(text, for: provider) }
     }
 
     private func load() {
         loading = true
         error = nil
-        let config = LLMConfig(provider: provider, baseURL: settings.baseURL(provider), apiKey: settings.apiKey(provider), model: text)
+        var config = settings.llmConfig(for: provider)
+        config.model = text
         Task {
             do {
                 loaded = try await LLMClient.listModels(config)
@@ -317,270 +421,446 @@ struct ModelField: View {
     }
 }
 
-// MARK: - Keys
-
-struct KeysView: View {
+/// Engine + model for file transcription with a given provider.
+struct STTOptions: View {
+    let provider: String
     @EnvironmentObject private var settings: AppSettings
+    @State private var model = ""
 
     var body: some View {
-        Form {
-            Section {
-                ForEach(APIProvider.allCases) { p in
-                    NavigationLink {
-                        ProviderKeyView(provider: p)
-                    } label: {
-                        HStack {
-                            Text(p.title)
-                            Spacer()
-                            if settings.hasKey(p) {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                            } else {
-                                Text("нет").foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            } footer: {
-                Text("Минимум: ключ Deepgram (расшифровка) + ключ любого ИИ (сводки, чат). Один ключ Groq/OpenAI работает и для ИИ, и для Whisper.")
+        let info = settings.provider(provider)
+        if info?.kind == .openai {
+            Picker("Способ", selection: Binding(
+                get: { settings.sttEngine(provider) ?? .whisper },
+                set: { settings.setSTTEngine($0, for: provider) })) {
+                Text(STTEngine.whisper.title).tag(STTEngine.whisper)
+                Text(STTEngine.chat.title).tag(STTEngine.chat)
             }
         }
-        .navigationTitle("Ключи API")
-        .id(settings.keysRevision)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Модель расшифровки")
+                TextField(settings.sttModel(provider), text: $model)
+                    .multilineTextAlignment(.trailing)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .onChange(of: model) { _, v in settings.setSTTModel(v, for: provider) }
+                let suggestions = sttSuggestions(info)
+                if !suggestions.isEmpty {
+                    Menu {
+                        ForEach(suggestions, id: \.self) { m in Button(m) { model = m } }
+                    } label: { Image(systemName: "chevron.up.chevron.down") }
+                }
+            }
+            Text("Сейчас: \(settings.sttModel(provider))" + (settings.sttEngine(provider) == .chat ? " · нужна модель, которая понимает звук (Gemini Flash/Pro, GPT-4o audio)" : ""))
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .onAppear { model = settings.sttModelOverride(provider) }
+        .onChange(of: provider) { _, p in model = settings.sttModelOverride(p) }
+    }
+
+    private func sttSuggestions(_ info: ProviderInfo?) -> [String] {
+        guard let info = info else { return [] }
+        var list = info.sttModels
+        if settings.sttEngine(provider) == .chat { list += info.models }
+        var seen = Set<String>()
+        return list.filter { seen.insert($0).inserted }
     }
 }
 
-struct ProviderKeyView: View {
-    let provider: APIProvider
+// MARK: - Provider card (keys, URL, model)
+
+private struct KeyDraft: Identifiable, Equatable {
+    let id = UUID()
+    var value: String
+}
+
+struct ProviderDetailView: View {
+    let id: String
     @EnvironmentObject private var settings: AppSettings
-    @State private var key = ""
-    @State private var baseURL = ""
-    @State private var reveal = false
-    @State private var testResult: String?
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var drafts: [KeyDraft] = []
+    @State private var revealed: Set<UUID> = []
+    @State private var results: [String: TestResult] = [:]
+    @State private var summary: TestResult?
     @State private var testing = false
-    @State private var testOK = false
+    @State private var sttResult: TestResult?
+    @State private var sttTesting = false
+    @State private var baseOverride = ""
+    @State private var confirmRemove = false
+
+    private var info: ProviderInfo? { settings.provider(id) }
 
     var body: some View {
         Form {
-            Section {
-                HStack {
-                    Group {
-                        if reveal {
-                            TextField("API-ключ", text: $key)
-                        } else {
-                            SecureField("API-ключ", text: $key)
-                        }
-                    }
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .font(.system(.body, design: .monospaced))
-                    Button { reveal.toggle() } label: { Image(systemName: reveal ? "eye.slash" : "eye") }
-                        .buttonStyle(.plain)
-                }
-                Button {
-                    if let s = UIPasteboard.general.string { key = s.trimmed }
-                } label: { Label("Вставить из буфера", systemImage: "doc.on.clipboard") }
-                if let url = provider.keyURL {
-                    Link(destination: url) { Label("Получить ключ", systemImage: "safari") }
-                }
-            } header: {
-                Text(provider.title)
-            } footer: {
-                Text(provider.keyHint)
-            }
-
-            if provider != .deepgram {
-                Section {
-                    TextField(provider.defaultBaseURL, text: $baseURL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                        .font(.callout)
-                } header: {
-                    Text("Адрес API")
-                } footer: {
-                    Text(provider == .custom
-                         ? "Любой OpenAI-совместимый сервер: Ollama, LM Studio, vLLM, прокси. Например http://192.168.1.10:11434/v1"
-                         : "Оставьте пустым, чтобы использовать адрес по умолчанию.")
-                }
-                Section {
-                    ModelField(provider: provider)
-                }
-            }
-
-            Section {
-                Button {
-                    save()
-                    test()
-                } label: {
-                    HStack {
-                        Text("Сохранить и проверить")
-                        if testing { Spacer(); ProgressView() }
+            if let info = info {
+                if !info.builtin { customSection }
+                keysSection(info)
+                if info.builtin && info.kind != .deepgram {
+                    Section {
+                        TextField(info.base, text: $baseOverride)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.callout)
+                    } header: {
+                        Text("Адрес API")
+                    } footer: {
+                        Text("Оставьте пустым, чтобы использовать адрес по умолчанию.")
                     }
                 }
-                .disabled(testing)
-                if let r = testResult {
-                    Label(r, systemImage: testOK ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                        .foregroundStyle(testOK ? Color.green : Color.red)
-                        .font(.footnote)
+                if info.llm {
+                    Section("Модель для ИИ и чата") { ModelField(provider: id) }
                 }
-                if settings.hasKey(provider) && provider != .custom {
-                    Button("Удалить ключ", role: .destructive) {
-                        key = ""
-                        settings.setAPIKey("", for: provider)
+                if info.builtin && info.kind == .openai && settings.sttEngine(id) != nil {
+                    Section("Расшифровка файлов") { STTOptions(provider: id) }
+                }
+                if !settings.proxyURL.trimmed.isEmpty {
+                    Section {
+                        Toggle("Через прокси", isOn: Binding(get: { settings.usesProxy(id) }, set: { settings.setUsesProxy($0, for: id) }))
+                    } footer: {
+                        Text(settings.proxyURL)
                     }
                 }
+                actionsSection(info)
             }
         }
-        .navigationTitle(provider.title)
+        .navigationTitle(info?.title ?? "Провайдер")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            key = settings.apiKey(provider)
-            let stored = UserDefaults.standard.string(forKey: "baseURL." + provider.rawValue) ?? ""
-            baseURL = stored
+            let keys = settings.apiKeys(id)
+            drafts = (keys.isEmpty ? [""] : keys).map { KeyDraft(value: $0) }
+            baseOverride = settings.baseURLOverride(id)
         }
         .onDisappear { save() }
+        .confirmationDialog("Удалить этого провайдера и его ключи?", isPresented: $confirmRemove, titleVisibility: .visible) {
+            Button("Удалить", role: .destructive) {
+                settings.removeCustomProvider(id)
+                dismiss()
+            }
+        }
+    }
+
+    // Custom provider fields
+    @ViewBuilder
+    private var customSection: some View {
+        if let c = settings.customProviders.first(where: { $0.id == id }) {
+            Section {
+                TextField("Название", text: Binding(get: { c.title }, set: { v in settings.updateCustomProvider(id) { $0.title = v } }))
+                Picker("Тип API", selection: Binding(get: { c.kind }, set: { v in settings.updateCustomProvider(id) { $0.kind = v } })) {
+                    Text("OpenAI-совместимый").tag(ProviderKind.openai)
+                    Text("Anthropic-совместимый").tag(ProviderKind.anthropic)
+                }
+                TextField("https://api.example.com/v1", text: Binding(get: { c.base }, set: { v in settings.updateCustomProvider(id) { $0.base = v.trimmed } }))
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                if c.kind == .openai {
+                    Picker("Расшифровка аудио", selection: Binding(get: { c.stt }, set: { v in settings.updateCustomProvider(id) { $0.stt = v } })) {
+                        Text("Не использовать").tag(STTEngine?.none)
+                        Text(STTEngine.whisper.title).tag(STTEngine?.some(.whisper))
+                        Text(STTEngine.chat.title).tag(STTEngine?.some(.chat))
+                    }
+                    if c.stt != nil {
+                        TextField("Модель расшифровки", text: Binding(get: { c.sttModel }, set: { v in settings.updateCustomProvider(id) { $0.sttModel = v.trimmed } }))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                }
+            } header: {
+                Text("Свой провайдер")
+            } footer: {
+                Text("Адрес — это base URL API, обычно заканчивается на /v1. Подойдёт любой сервис с OpenAI- или Anthropic-совместимым API.")
+            }
+        }
+    }
+
+    private func keysSection(_ info: ProviderInfo) -> some View {
+        Section {
+            ForEach($drafts) { $draft in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Ключ \((drafts.firstIndex(where: { $0.id == draft.id }) ?? 0) + 1)").font(.subheadline.bold())
+                        Spacer()
+                        keyBadge(draft.value)
+                    }
+                    HStack(spacing: 10) {
+                        Group {
+                            if revealed.contains(draft.id) {
+                                TextField("Вставьте ключ", text: $draft.value)
+                            } else {
+                                SecureField("Вставьте ключ", text: $draft.value)
+                            }
+                        }
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.callout, design: .monospaced))
+                        Button {
+                            if let s = UIPasteboard.general.string { draft.value = s.trimmed }
+                        } label: { Image(systemName: "doc.on.clipboard") }
+                        Button {
+                            if revealed.contains(draft.id) { revealed.remove(draft.id) } else { revealed.insert(draft.id) }
+                        } label: { Image(systemName: revealed.contains(draft.id) ? "eye.slash" : "eye") }
+                        Button(role: .destructive) {
+                            remove(draft.id)
+                        } label: { Image(systemName: "xmark.circle") }
+                    }
+                    .buttonStyle(.borderless)
+                    if let r = results[draft.value.trimmed], !draft.value.trimmed.isEmpty {
+                        TestResultView(result: r)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            Button {
+                drafts.append(KeyDraft(value: ""))
+            } label: { Label("Ещё ключ (другой аккаунт)", systemImage: "plus") }
+            if let url = URL(string: info.keyURL), !info.keyURL.isEmpty {
+                Link(destination: url) { Label("Получить ключ", systemImage: "safari") }
+            }
+        } header: {
+            Text(info.builtin ? "API-ключи" : "API-ключи (если нужны)")
+        } footer: {
+            Text("Можно добавить ключи с нескольких аккаунтов. Когда один упрётся в лимит (у Gemini — поминутный или дневной), закончатся деньги или ключ не примут, Vox сам переключится на следующий и поставит этот на паузу до сброса лимита. \(info.hint)")
+        }
+    }
+
+    @ViewBuilder
+    private func keyBadge(_ raw: String) -> some View {
+        let key = raw.trimmed
+        if key.isEmpty {
+            EmptyView()
+        } else if let p = settings.keyPause(id, key) {
+            Text("⏸ \(p.reason) · до \(Calendar.current.isDateInToday(p.until) ? "" : "завтра ")\(Formatters.time.string(from: p.until))")
+                .font(.caption2).foregroundStyle(.orange)
+        } else if settings.apiKeys(id).contains(key) {
+            if settings.apiKey(id) == key {
+                Text("● используется").font(.caption2).foregroundStyle(.green)
+            } else {
+                Text("запасной").font(.caption2).foregroundStyle(.secondary)
+            }
+        } else {
+            Text("не сохранён").font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    private func actionsSection(_ info: ProviderInfo) -> some View {
+        Section {
+            Button {
+                saveAndTest()
+            } label: {
+                HStack {
+                    Text("Сохранить и проверить ключи")
+                    if testing { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(testing)
+            if let s = summary { TestResultView(result: s) }
+
+            if settings.sttEngine(id) != nil && info.kind != .deepgram {
+                Button {
+                    testSTT()
+                } label: {
+                    HStack {
+                        Label("Проверить расшифровку", systemImage: "waveform")
+                        if sttTesting { Spacer(); ProgressView() }
+                    }
+                }
+                .disabled(sttTesting)
+                if let r = sttResult { TestResultView(result: r) }
+            }
+            if info.llm {
+                Button(settings.llmProvider == id ? "✓ Используется для ИИ и чата" : "Использовать для ИИ и чата") {
+                    settings.llmProvider = id
+                }
+                .disabled(settings.llmProvider == id)
+            }
+            if settings.sttEngine(id) != nil {
+                Button(settings.batchProvider == id ? "✓ Используется для расшифровки файлов" : "Использовать для расшифровки файлов") {
+                    settings.batchProvider = id
+                }
+                .disabled(settings.batchProvider == id)
+            }
+            if !info.builtin {
+                Button("Удалить провайдера", role: .destructive) { confirmRemove = true }
+            }
+        }
+    }
+
+    // MARK: Actions
+
+    private func remove(_ draftID: UUID) {
+        drafts.removeAll { $0.id == draftID }
+        if drafts.isEmpty { drafts = [KeyDraft(value: "")] }
+        settings.setAPIKeys(drafts.map { $0.value }, for: id)
     }
 
     private func save() {
-        if key.trimmed != settings.apiKey(provider) { settings.setAPIKey(key, for: provider) }
-        if provider != .deepgram { settings.setBaseURL(baseURL, for: provider) }
+        settings.setAPIKeys(drafts.map { $0.value }, for: id)
+        if let info = info, info.builtin, info.kind != .deepgram, baseOverride.trimmed != settings.baseURLOverride(id).trimmed {
+            settings.setBaseURL(baseOverride, for: id)
+        }
     }
 
-    private func test() {
+    private func saveAndTest() {
+        save()
+        guard let info = info else { return }
         testing = true
-        testResult = nil
-        let p = provider
-        let k = key.trimmed
-        let config = LLMConfig(provider: p, baseURL: settings.baseURL(p), apiKey: k, model: settings.model(p))
+        summary = nil
+        results = [:]
+        let keys = settings.apiKeys(id)
+        let targets = keys.isEmpty && !info.builtin ? [""] : keys
+        let providerID = id
+        let appSettings = settings
+        Task {
+            var ok = 0
+            for key in targets {
+                do {
+                    if info.kind == .deepgram {
+                        try await BatchTranscriber.verifyDeepgram(key: key, baseURL: appSettings.route(providerID, appSettings.baseURL(providerID)))
+                        results[key] = TestResult(ok: true, text: "работает")
+                    } else if info.llm {
+                        let cfg = appSettings.llmConfig(for: providerID, fixedKey: key)
+                        let r = try await LLMClient.complete(cfg, system: "Отвечай очень кратко.", messages: [LLMMessage(role: "user", content: "Скажи «работает» одним словом.")])
+                        results[key] = TestResult(ok: true, text: "работает (\(cfg.model): \(r.trimmed.prefix(40)))")
+                    } else {
+                        results[key] = TestResult(ok: true, text: "сохранён")
+                    }
+                    appSettings.clearPause(providerID, key)
+                    ok += 1
+                } catch {
+                    results[key] = TestResult(ok: false, text: error.localizedDescription)
+                }
+            }
+            if targets.isEmpty {
+                summary = TestResult(ok: false, text: "Добавьте хотя бы один ключ")
+            } else if ok == targets.count {
+                summary = TestResult(ok: true, text: targets.count > 1 ? "Все ключи работают (\(ok))" : "Ключ работает")
+            } else {
+                summary = TestResult(ok: ok > 0, text: "Работают \(ok) из \(targets.count)")
+            }
+            if ok > 0 && info.llm && !appSettings.hasKey(appSettings.llmProvider) { appSettings.llmProvider = providerID }
+            testing = false
+        }
+    }
+
+    private func testSTT() {
+        save()
+        sttTesting = true
+        sttResult = nil
+        let options = settings.batchOptions(for: id)
         Task {
             do {
-                if p == .deepgram {
-                    try await BatchTranscriber.verifyDeepgram(key: k)
-                    testResult = "Ключ Deepgram работает"
-                } else {
-                    let reply = try await LLMClient.complete(config, system: "Отвечай очень кратко.", messages: [LLMMessage(role: "user", content: "Скажи «работает» одним словом.")])
-                    testResult = "Ответ модели \(config.model): \(reply.trimmed.prefix(60))"
-                }
-                testOK = true
+                try await BatchTranscriber.verify(options: options)
+                sttResult = TestResult(ok: true, text: "Расшифровка через \(options.title) (\(options.model)) работает")
             } catch {
-                testResult = error.localizedDescription
-                testOK = false
+                sttResult = TestResult(ok: false, text: error.localizedDescription)
             }
-            testing = false
+            sttTesting = false
         }
     }
 }
 
-// MARK: - Device
+// MARK: - Add provider
 
-struct DeviceView: View {
-    @EnvironmentObject private var device: OmiDeviceManager
-    @EnvironmentObject private var recorder: RecordingController
+struct AddProviderView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @State private var created: String?
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(Providers.presets) { p in
+                    Button {
+                        created = settings.addCustomProvider(p)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(p.title).foregroundStyle(.primary)
+                            Text(p.base.isEmpty ? "свой адрес" : p.base).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } footer: {
+                Text("Подходит любой сервис с OpenAI-совместимым API (так устроено большинство нейросетей) или с API как у Anthropic. Выберите шаблон — адрес подставится сам, останется вставить ключ.")
+            }
+        }
+        .navigationTitle("Добавить провайдера")
+        .navigationDestination(item: $created) { id in
+            ProviderDetailView(id: id)
+        }
+    }
+}
+
+// MARK: - Instructions
+
+struct InstructionsView: View {
     @EnvironmentObject private var settings: AppSettings
 
     var body: some View {
         Form {
-            if case .unavailable(let msg) = device.state {
-                Section {
-                    Label(msg, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
-                }
-            }
-            if device.hasSavedDevice {
-                Section("Моё устройство") {
-                    HStack {
-                        Image(systemName: "circle.circle.fill").font(.title).foregroundStyle(Color.accentColor)
-                        VStack(alignment: .leading) {
-                            Text(device.deviceName ?? device.savedDeviceName ?? "Omi").font(.headline)
-                            Text(stateText).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if let b = device.batteryLevel {
-                            Label("\(b)%", systemImage: batteryIcon(b)).font(.callout).monospacedDigit()
-                        }
-                    }
-                    if device.isConnected {
-                        if let codec = device.codec { row("Кодек", codec.title) }
-                        if let fw = device.firmware { row("Прошивка", fw) }
-                        if let model = device.model { row("Модель", model) }
-                        if device.lostFrames > 0 { row("Потеряно кадров", "\(device.lostFrames)") }
-                        if !recorder.isRecording {
-                            Button {
-                                settings.preferredSource = .omi
-                                Task { await recorder.start(source: .omi) }
-                            } label: { Label("Начать запись с Omi", systemImage: "record.circle") }
-                        }
-                    } else {
-                        Button { device.reconnectSaved() } label: { Label("Переподключить", systemImage: "arrow.clockwise") }
-                    }
-                    Button("Отключить и забыть", role: .destructive) { device.disconnect(forget: true) }
-                }
-            }
-
             Section {
-                if device.state == .scanning {
-                    HStack {
-                        ProgressView()
-                        Text("Ищу устройства…").foregroundStyle(.secondary)
-                    }
-                } else {
-                    Button { device.startScan() } label: { Label("Найти устройство", systemImage: "magnifyingglass") }
-                }
-                ForEach(device.discovered) { d in
-                    Button {
-                        device.connect(to: d.id)
-                    } label: {
-                        HStack {
-                            Image(systemName: d.isOmi ? "circle.circle.fill" : "dot.radiowaves.left.and.right")
-                            VStack(alignment: .leading) {
-                                Text(d.name)
-                                Text("Сигнал \(d.rssi) dBm").font(.caption2).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if d.id == device.savedDeviceID && device.isConnected {
-                                Image(systemName: "checkmark").foregroundStyle(.green)
-                            }
-                        }
-                    }
-                    .foregroundStyle(.primary)
-                }
-                Toggle("Показывать все Bluetooth-устройства", isOn: $device.showAllDevices)
-            } header: {
-                Text("Поиск")
+                TextField("Например: пиши кратко, выделяй сроки и суммы; меня интересуют решения по проекту X…",
+                          text: $settings.customInstructions, axis: .vertical)
+                    .lineLimit(5...20)
             } footer: {
-                Text("Включите Omi и держите рядом с iPhone. Если устройство подключено к официальному приложению Omi — сначала отключите его там. Vox будет сам переподключаться к кулону, как только он окажется рядом.")
+                Text("Добавляется к каждому запросу на сводку.")
             }
         }
-        .navigationTitle("Omi")
-        .onAppear { device.activate() }
-        .onDisappear { device.stopScan() }
+        .navigationTitle("Инструкции")
     }
+}
 
-    private var stateText: String {
-        switch device.state {
-        case .connected: return device.isStreaming ? "Подключено · звук идёт" : "Подключено"
-        case .connecting: return "Подключение…"
-        case .reconnecting: return "Ожидание устройства…"
-        case .scanning: return "Поиск…"
-        case .idle: return "Не в сети"
-        case .unavailable(let m): return m
+// MARK: - Proxy help
+
+struct ProxyHelpView: View {
+    @State private var code = ""
+    @State private var loadError: String?
+    @State private var copied = false
+
+    private static let codeURL = URL(string: "https://raw.githubusercontent.com/pavel13801/vox/main/web/proxy-worker.js")!
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                MarkdownText(text: """
+                Бесплатный прокси на Cloudflare пропускает запросы к Gemini, OpenAI, Claude и другим ИИ через серверы Cloudflare — так блокировка по стране не срабатывает. Ключи через него только проходят и нигде не сохраняются.
+
+                1. Зарегистрируйтесь на **dash.cloudflare.com** (бесплатно, карта не нужна).
+                2. Слева **Workers & Pages** → **Create** → **Create Worker** → назовите, например, `vox-proxy` → **Deploy**.
+                3. Нажмите **Edit code**, удалите всё и вставьте код ниже (кнопка «Скопировать») → **Deploy**.
+                4. Скопируйте адрес воркера (вида `https://vox-proxy.имя.workers.dev`) и вставьте в Vox: **Настройки → Прокси**.
+                5. Готово: Gemini, OpenAI и Claude автоматически пойдут через прокси. Для других провайдеров включите «Через прокси» в их карточке.
+                """)
+                Button {
+                    UIPasteboard.general.string = code
+                    copied = true
+                } label: {
+                    Label(copied ? "Скопировано" : "Скопировать код прокси", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(code.isEmpty)
+                if let e = loadError {
+                    Text(e).font(.footnote).foregroundStyle(.red)
+                }
+                Text(code.isEmpty ? "Загрузка кода…" : code)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+            }
+            .padding()
         }
-    }
-
-    private func batteryIcon(_ b: Int) -> String {
-        switch b {
-        case ..<15: return "battery.0percent"
-        case ..<40: return "battery.25percent"
-        case ..<65: return "battery.50percent"
-        case ..<90: return "battery.75percent"
-        default: return "battery.100percent"
-        }
-    }
-
-    private func row(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Text(value).foregroundStyle(.secondary)
+        .navigationTitle("Свой прокси")
+        .task {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: Self.codeURL)
+                code = String(data: data, encoding: .utf8) ?? ""
+            } catch {
+                loadError = "Не удалось загрузить код (нужен интернет). Его также можно открыть на github.com/pavel13801/vox → web/proxy-worker.js"
+            }
         }
     }
 }
@@ -599,13 +879,17 @@ struct HelpView: View {
             - Автоматизируйте: приложение «Команды» → Автоматизация → «Время суток» (например, каждый день в 10:00) → действие SideStore «Refresh All». Тогда Vox не истечёт никогда.
             - Платный аккаунт разработчика Apple ($99/год) — подпись на 1 год.
 
-            ## Обновление Vox
-            Новая сборка появляется в GitHub → Releases. Установите её поверх старой через SideStore (+ → выбрать .ipa) — все записи сохранятся, если bundle ID тот же.
+            ## Какие ключи нужны
+            - Для **расшифровки** подойдёт любой вариант: **Deepgram** (лучший, со спикерами и live-текстом), **Gemini**, **Groq Whisper** (бесплатно), OpenAI, OpenRouter или свой сервер.
+            - Для **сводок и чата** — любая нейросеть: Gemini, OpenAI, Claude, Groq, DeepSeek, OpenRouter, Mistral, Grok, Qwen и любые другие (Настройки → Добавить любой другой ИИ).
+            - У каждого провайдера можно сохранить **несколько ключей** с разных аккаунтов: если один упрётся в лимит, Vox сам переключится на следующий.
 
-            ## Ключи
-            - Deepgram: console.deepgram.com — при регистрации дают $200 (сотни часов записи).
-            - Gemini: aistudio.google.com — бесплатный лимит, хватает для сводок и чата.
-            - Groq: console.groq.com — бесплатно, есть Whisper для расшифровки.
+            ## Ошибка 400 / «location is not supported»
+            Google (Gemini), OpenAI и Anthropic не обслуживают Россию. Варианты: VPN на телефоне, **OpenRouter** или **DeepSeek** (работают из России) или свой бесплатный прокси (Настройки → Прокси).
+            Если пишет «ключ не подходит» — скопируйте ключ заново целиком (у Gemini он начинается с «AIza»).
+
+            ## Обновление Vox
+            Новая сборка появляется в GitHub → Releases. Установите её поверх старой через SideStore — все записи сохранятся.
 
             ## Фоновая запись
             Запись с микрофона продолжается при заблокированном экране. Не закрывайте Vox свайпом из переключателя приложений — iOS остановит запись. Аудио пишется на диск сразу, так что даже при сбое запись восстановится при следующем запуске.

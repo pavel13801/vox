@@ -65,6 +65,11 @@ final class DeepgramLiveClient: NSObject, URLSessionWebSocketDelegate {
         var sampleRate: Double
         var diarize: Bool
         var keyterms: [String]
+        /// All keys of the provider (free ones first). When Deepgram refuses a key, the next one is tried.
+        var apiKeys: [String] = []
+        var endpoint: String = "wss://api.deepgram.com/v1/listen"
+        /// Called (on an internal queue) when a key was refused: (key, reason).
+        var onKeyFailed: ((String, String) -> Void)? = nil
     }
 
     var onStatus: ((Status) -> Void)?
@@ -85,6 +90,11 @@ final class DeepgramLiveClient: NSObject, URLSessionWebSocketDelegate {
     private var finishing = false
     private var attempt = 0
     private var gaps = false
+    private var keyIndex = 0
+    private var refusedKeys = 0
+
+    private var keys: [String] { opts.apiKeys.isEmpty ? [opts.apiKey] : opts.apiKeys }
+    private var currentKey: String { keys[keyIndex % keys.count] }
 
     private var pending: [(data: Data, t0: Double)] = []
     private var pendingBytes = 0
@@ -171,7 +181,7 @@ final class DeepgramLiveClient: NSObject, URLSessionWebSocketDelegate {
     // MARK: Connection
 
     private func buildRequest() -> URLRequest? {
-        guard var comps = URLComponents(string: "wss://api.deepgram.com/v1/listen") else { return nil }
+        guard var comps = URLComponents(string: opts.endpoint) else { return nil }
         var items: [URLQueryItem] = [
             URLQueryItem(name: "model", value: opts.model),
             URLQueryItem(name: "language", value: opts.language),
@@ -193,7 +203,7 @@ final class DeepgramLiveClient: NSObject, URLSessionWebSocketDelegate {
         comps.queryItems = items
         guard let url = comps.url else { return nil }
         var req = URLRequest(url: url)
-        req.setValue("Token \(opts.apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("Token \(currentKey)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 20
         return req
     }
@@ -257,6 +267,24 @@ final class DeepgramLiveClient: NSObject, URLSessionWebSocketDelegate {
         guard running else { return }
 
         let status = (t.response as? HTTPURLResponse)?.statusCode ?? 0
+        // Key problem (invalid, no balance, rate limit) — switch to the next key if there is one.
+        if [401, 402, 403, 429].contains(status) && keys.count > 1 && refusedKeys < keys.count - 1 {
+            let reason: String
+            switch status {
+            case 402: reason = "закончились деньги на счёте"
+            case 429: reason = "лимит запросов"
+            default: reason = "ключ не принят"
+            }
+            opts.onKeyFailed?(currentKey, reason)
+            refusedKeys += 1
+            keyIndex += 1
+            onStatus?(.reconnecting(attempt + 1))
+            q.async { [weak self] in
+                guard let self = self, self.running, self.task == nil else { return }
+                self.connect()
+            }
+            return
+        }
         if status == 401 || status == 403 {
             running = false
             onStatus?(.failed("Deepgram: неверный API-ключ или нет доступа"))
@@ -342,6 +370,7 @@ final class DeepgramLiveClient: NSObject, URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         guard webSocketTask === task else { return }
         isOpen = true
+        refusedKeys = 0
         attempt = 0
         onStatus?(.open)
         flushPending(on: webSocketTask)

@@ -10,6 +10,8 @@ final class ProcessingQueue: ObservableObject {
     static let shared = ProcessingQueue()
 
     @Published private(set) var activeID: UUID?
+    /// "часть 2 из 7" while a long file is transcribed in pieces.
+    @Published var progress: [UUID: String] = [:]
     private var queue: [UUID] = []
     private var running = false
 
@@ -143,17 +145,13 @@ final class ProcessingQueue: ObservableObject {
                 return await summarizeStep(id)
             }
             store.update(id) { $0.status = .transcribing; $0.errorMessage = nil }
-            let provider = settings.batchProvider
-            let options = BatchTranscriber.Options(
-                provider: provider,
-                apiKey: settings.apiKey(provider.apiProvider),
-                baseURL: settings.baseURL(provider.apiProvider),
-                model: provider == .deepgram ? settings.deepgramModel : settings.effectiveBatchModel,
-                language: settings.language,
-                diarize: settings.diarize,
-                keyterms: settings.keytermList)
+            var options = settings.batchOptions()
+            options.onProgress = { i, n in
+                Task { @MainActor in ProcessingQueue.shared.progress[id] = n > 1 ? "часть \(i + 1) из \(n)" : nil }
+            }
             do {
                 let segments = try await BatchTranscriber.transcribe(file: audio, options: options)
+                progress[id] = nil
                 store.update(id) { c in
                     // Keep the live transcript if the batch result is somehow empty.
                     if !segments.isEmpty || c.segments.isEmpty {
@@ -167,6 +165,7 @@ final class ProcessingQueue: ObservableObject {
                     if let last = segments.last, c.duration < last.end { c.duration = last.end }
                 }
             } catch {
+                progress[id] = nil
                 store.update(id) { c in
                     c.status = .failed
                     c.errorMessage = error.localizedDescription

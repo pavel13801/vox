@@ -142,7 +142,7 @@ struct ConversationDetailView: View {
         if c.isProcessing || processing.activeID == id {
             HStack(spacing: 10) {
                 ProgressView()
-                Text(c.status == .summarizing ? "ИИ анализирует запись…" : "Идёт расшифровка…").font(.subheadline)
+                Text(c.status == .summarizing ? "ИИ анализирует запись…" : "Идёт расшифровка…" + (processing.progress[id].map { " (\($0))" } ?? "")).font(.subheadline)
                 Spacer()
             }
             .cardStyle()
@@ -337,7 +337,7 @@ struct ConversationDetailView: View {
             if store.audioURL(for: c) != nil {
                 Button {
                     processing.retranscribe(id)
-                } label: { Label("Расшифровать заново (\(settings.batchProvider == .deepgram ? "Deepgram" : "Whisper"))", systemImage: "arrow.clockwise") }
+                } label: { Label("Расшифровать заново (\(settings.title(settings.batchProvider)))", systemImage: "arrow.clockwise") }
                 .disabled(c.isProcessing)
             }
             if settings.llmConfigured {
