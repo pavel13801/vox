@@ -17,8 +17,8 @@ export const BUILTIN = {
   },
   gemini: {
     title: 'Google Gemini', kind: 'openai', base: 'https://generativelanguage.googleapis.com/v1beta/openai', llm: true, stt: 'chat', blocked: true,
-    model: 'gemini-flash-latest', models: ['gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-pro-latest', 'gemini-2.5-flash', 'gemini-2.5-pro'],
-    sttModel: 'gemini-flash-latest', sttModels: ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-pro-latest'],
+    model: 'gemini-3.8-flash', models: ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-pro-latest'],
+    sttModel: 'gemini-3.8-flash', sttModels: ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-pro-latest'],
     hint: 'aistudio.google.com → Get API key. Ключ начинается с «AIza». Google не обслуживает Россию — нужен VPN или прокси.',
     url: 'https://aistudio.google.com/apikey',
   },
@@ -36,8 +36,8 @@ export const BUILTIN = {
   },
   openrouter: {
     title: 'OpenRouter', kind: 'openai', base: 'https://openrouter.ai/api/v1', llm: true, stt: 'chat',
-    model: 'google/gemini-2.5-flash', models: ['google/gemini-2.5-flash', 'openai/gpt-5-mini', 'anthropic/claude-haiku-5-5', 'deepseek/deepseek-chat', 'x-ai/grok-4', 'qwen/qwen3-max'],
-    sttModel: 'google/gemini-2.5-flash', sttModels: ['google/gemini-2.5-flash', 'google/gemini-2.5-pro', 'openai/gpt-4o-audio-preview'],
+    model: 'google/gemini-3.8-flash', models: ['google/gemini-3.8-flash', 'openai/gpt-5-mini', 'anthropic/claude-haiku-5-5', 'deepseek/deepseek-chat', 'x-ai/grok-4', 'qwen/qwen3-max'],
+    sttModel: 'google/gemini-3.8-flash', sttModels: ['google/gemini-3.8-flash', 'openai/gpt-4o-audio-preview'],
     hint: 'openrouter.ai → Keys. Сотни моделей по одному ключу, работает из России. Расшифровка — через Gemini на OpenRouter.',
     url: 'https://openrouter.ai/keys',
   },

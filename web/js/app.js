@@ -625,7 +625,7 @@ function sttModelField(p) {
     <input id="sttmodel-${esc(p)}" type="text" list="sttmodels-${esc(p)}" placeholder="${esc(info.sttModel || (engine === 'chat' ? 'модель с поддержкой аудио' : 'whisper-1'))}"
       value="${esc(settings.values.sttModels?.[p] || '')}" data-setin="sttModels" data-p="${esc(p)}" autocapitalize="off" autocorrect="off" spellcheck="false">
     <datalist id="sttmodels-${esc(p)}">${suggestions.map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>
-    <small class="muted">Сейчас: ${esc(settings.sttModel(p))}${engine === 'chat' ? ' · нужна модель, которая понимает звук (Gemini 2.x/Flash, GPT-4o audio)' : ''}</small>
+    <small class="muted">Сейчас: ${esc(settings.sttModel(p))}${engine === 'chat' ? ' · нужна модель, которая понимает звук (например, gemini-3.8-flash)' : ''}</small>
   </label>`;
 }
 

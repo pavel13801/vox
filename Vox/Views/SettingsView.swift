@@ -452,7 +452,7 @@ struct STTOptions: View {
                     } label: { Image(systemName: "chevron.up.chevron.down") }
                 }
             }
-            Text("Сейчас: \(settings.sttModel(provider))" + (settings.sttEngine(provider) == .chat ? " · нужна модель, которая понимает звук (Gemini Flash/Pro, GPT-4o audio)" : ""))
+            Text("Сейчас: \(settings.sttModel(provider))" + (settings.sttEngine(provider) == .chat ? " · нужна модель, которая понимает звук (например, gemini-3.8-flash)" : ""))
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .onAppear { model = settings.sttModelOverride(provider) }
